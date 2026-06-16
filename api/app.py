@@ -201,7 +201,27 @@ def remove_blacklist(user_id: int, user=Depends(get_current_user)):
     conn.close()
 
     return {"message": "Removed from blacklist"}
+@app.post("/transaction")
+def add_transaction(amount: float, user=Depends(get_current_user)):
+    conn = get_connection()
+    cursor = conn.cursor()
 
+    fraud = amount > 10000  # simple rule
+
+    cursor.execute(
+        "INSERT INTO transactions (user_id, amount, fraud) VALUES (%s, %s, %s)",
+        (user["sub"], amount, fraud)
+    )
+
+    conn.commit()
+
+    cursor.close()
+    conn.close()
+
+    return {
+        "message": "Transaction added",
+        "fraud": fraud
+    }
 
 # ================= ROOT ================= #
 
