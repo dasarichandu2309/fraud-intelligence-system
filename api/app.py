@@ -1,142 +1,210 @@
-from fastapi import FastAPI, Depends, HTTPException
-from fastapi.security import HTTPBearer
-from pydantic import BaseModel
-from db import get_connection
+from fastapi import FastAPI, HTTPException, Depends
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from database import get_connection
 from passlib.context import CryptContext
-from jose import jwt
-from datetime import datetime, timedelta
-import random
+from jose import jwt, JWTError
+import datetime
 
 app = FastAPI()
 
+# 🔐 Security
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+security = HTTPBearer()
 
 SECRET_KEY = "supersecretkey"
 ALGORITHM = "HS256"
-security = HTTPBearer()
 
 
-def verify_password(plain, hashed):
-    return pwd_context.verify(plain[:72], hashed)
+# ================= PASSWORD ================= #
+
+def hash_password(password: str):
+    return pwd_context.hash(password)
 
 
-def verify_token(credentials=Depends(security)):
+def verify_password(plain_password: str, hashed_password: str):
+    return pwd_context.verify(plain_password, hashed_password)
+
+
+# ================= AUTH ================= #
+
+def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security)):
+    token = credentials.credentials
+
     try:
-        token = credentials.credentials.strip().replace('"', '')
-
         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
         return payload
-
-    except Exception as e:
-        print("JWT ERROR:", str(e))
+    except JWTError:
         raise HTTPException(status_code=401, detail="Invalid token")
 
 
+# ================= CREATE USER ================= #
+
+@app.post("/create_user")
+def create_user(username: str, password: str, role: str = "analyst"):
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    hashed = hash_password(password)
+
+    try:
+        cursor.execute(
+            "INSERT INTO users (username, password, role) VALUES (%s, %s, %s)",
+            (username, hashed, role)
+        )
+        conn.commit()
+    except Exception as e:
+        conn.rollback()
+        raise HTTPException(status_code=400, detail=str(e))
+
+    cursor.close()
+    conn.close()
+
+    return {"message": "User created successfully"}
+
+
+# ================= LOGIN ================= #
+
 @app.post("/login")
 def login(username: str, password: str):
-
     conn = get_connection()
     cursor = conn.cursor()
 
     cursor.execute("SELECT * FROM users WHERE username=%s", (username,))
     user = cursor.fetchone()
 
-    if not user or not verify_password(password, user[2]):
+    cursor.close()
+    conn.close()
+
+    if not user:
         raise HTTPException(status_code=401, detail="Invalid credentials")
 
-    token = jwt.encode({
-        "sub": username,
-        "role": user[3],
-        "exp": datetime.utcnow() + timedelta(hours=2)
-    }, SECRET_KEY, algorithm=ALGORITHM)
+    if not verify_password(password, user[2]):
+        raise HTTPException(status_code=401, detail="Invalid credentials")
 
-    conn.close()
+    payload = {
+        "sub": user[1],
+        "role": user[3],
+        "exp": datetime.datetime.utcnow() + datetime.timedelta(hours=5)
+    }
+
+    token = jwt.encode(payload, SECRET_KEY, algorithm=ALGORITHM)
+
     return {"access_token": token}
 
 
-class Transaction(BaseModel):
-    user_id: int
-    amount: float
-    hour: int
-
+# ================= PREDICT ================= #
 
 @app.post("/predict")
-def predict(data: Transaction, user=Depends(verify_token)):
-
+def predict(data: dict, user=Depends(get_current_user)):
     conn = get_connection()
     cursor = conn.cursor()
 
-    # blacklist check
-    cursor.execute("SELECT * FROM blacklist WHERE user_id=%s", (data.user_id,))
-    if cursor.fetchone():
-        conn.close()
-        return {"error": "User is blacklisted"}
+    # Dummy fraud logic (replace with ML later)
+    amount = data.get("amount", 0)
+    fraud = amount > 10000
 
-    fraud = 1 if data.amount > 15000 else 0
-    risk = random.randint(1, 5)
-
-    explanation = {
-        "amount": round(random.uniform(-1, 1), 3),
-        "hour": round(random.uniform(-1, 1), 3)
-    }
-
-    # save
-    cursor.execute("""
-    INSERT INTO history (user_id, amount, hour, fraud, risk)
-    VALUES (%s, %s, %s, %s, %s)
-    """, (data.user_id, data.amount, data.hour, fraud, risk))
-
-    # audit log
-    cursor.execute("""
-    INSERT INTO audit_logs (username, action, amount, fraud)
-    VALUES (%s, %s, %s, %s)
-    """, (user["sub"], "predict", data.amount, fraud))
+    cursor.execute(
+        "INSERT INTO transactions (user_id, amount, fraud) VALUES (%s, %s, %s)",
+        (user["sub"], amount, fraud)
+    )
 
     conn.commit()
+
+    cursor.close()
     conn.close()
 
-    return {
-        "fraud": fraud,
-        "risk": risk,
-        "explanation": explanation
-    }
+    return {"fraud": fraud}
 
 
-@app.get("/history/{user_id}")
-def history(user_id: int, user=Depends(verify_token)):
+# ================= HISTORY ================= #
 
+@app.get("/history")
+def get_history(user=Depends(get_current_user)):
     conn = get_connection()
     cursor = conn.cursor()
 
-    cursor.execute("""
-    SELECT amount, hour, fraud, risk, time
-    FROM history WHERE user_id=%s ORDER BY time DESC
-    """, (user_id,))
+    cursor.execute(
+        "SELECT * FROM transactions WHERE user_id=%s",
+        (user["sub"],)
+    )
+    data = cursor.fetchall()
 
-    rows = cursor.fetchall()
+    cursor.close()
     conn.close()
 
-    return {"history": [
-        {"amount": r[0], "hour": r[1], "fraud": r[2], "risk": r[3], "time": r[4]}
-        for r in rows
-    ]}
+    return {"history": data}
 
+
+# ================= AUDIT LOGS ================= #
 
 @app.get("/audit_logs")
-def audit_logs(user=Depends(verify_token)):
-
+def audit_logs(user=Depends(get_current_user)):
     conn = get_connection()
     cursor = conn.cursor()
 
-    cursor.execute("""
-    SELECT username, action, amount, fraud, time
-    FROM audit_logs ORDER BY time DESC
-    """)
+    cursor.execute("SELECT * FROM audit_logs ORDER BY time DESC")
+    logs = cursor.fetchall()
 
-    rows = cursor.fetchall()
+    cursor.close()
     conn.close()
 
-    return {"logs": [
-        {"user": r[0], "action": r[1], "amount": r[2], "fraud": r[3], "time": r[4]}
-        for r in rows
-    ]}
+    return {"logs": logs}
+
+
+# ================= BLACKLIST ================= #
+
+@app.post("/blacklist")
+def blacklist_user(user_id: int, reason: str, user=Depends(get_current_user)):
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    cursor.execute(
+        "INSERT INTO blacklist (user_id, reason) VALUES (%s, %s)",
+        (user_id, reason)
+    )
+
+    conn.commit()
+
+    cursor.close()
+    conn.close()
+
+    return {"message": "User blacklisted"}
+
+
+@app.get("/blacklist")
+def get_blacklist(user=Depends(get_current_user)):
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    cursor.execute("SELECT * FROM blacklist")
+    data = cursor.fetchall()
+
+    cursor.close()
+    conn.close()
+
+    return {"blacklist": data}
+
+
+@app.delete("/blacklist/{user_id}")
+def remove_blacklist(user_id: int, user=Depends(get_current_user)):
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    cursor.execute(
+        "DELETE FROM blacklist WHERE user_id=%s",
+        (user_id,)
+    )
+
+    conn.commit()
+
+    cursor.close()
+    conn.close()
+
+    return {"message": "Removed from blacklist"}
+
+
+# ================= ROOT ================= #
+
+@app.get("/")
+def home():
+    return {"message": "Fraud Detection API running 🚀"}
