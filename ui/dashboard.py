@@ -16,17 +16,20 @@ if "role" not in st.session_state:
 st.title("🏦 Fraud Detection System")
 
 # LOGIN
-if st.session_state.token is None:
+if st.button("Login"):
 
-    username = st.text_input("Username")
-    password = st.text_input("Password", type="password")
-
-    if st.button("Login"):
-
+    try:
         res = requests.post(
             f"{API_URL}/login",
-            params={"username": username, "password": password}
+            json={
+                "username": username,
+                "password": password
+            }
         )
+
+        # 🔍 DEBUG PRINT
+        st.write("Status Code:", res.status_code)
+        st.write("Response:", res.text)
 
         if res.status_code == 200:
             token = res.json()["access_token"]
@@ -35,10 +38,13 @@ if st.session_state.token is None:
             decoded = jwt.decode(token, "supersecretkey", algorithms=["HS256"])
             st.session_state.role = decoded["role"]
 
-            st.success("Login success")
+            st.success("Login success ✅")
             st.rerun()
         else:
-            st.error("Invalid credentials")
+            st.error("Invalid credentials ❌")
+
+    except Exception as e:
+        st.error(f"Error: {e}")
 
 # DASHBOARD
 else:
