@@ -1,26 +1,25 @@
 from fastapi import FastAPI, HTTPException, Depends
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from database import get_connection
-from passlib.context import CryptContext
 from jose import jwt, JWTError
 import datetime
+import hashlib
 
 app = FastAPI()
 
 # ================= CONFIG ================= #
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 security = HTTPBearer()
 
 SECRET_KEY = "supersecretkey"
 ALGORITHM = "HS256"
 
-# ================= PASSWORD ================= #
+# ================= PASSWORD (FINAL FIX) ================= #
 
 def hash_password(password: str):
-    return pwd_context.hash(password)
+    return hashlib.sha256(password.encode()).hexdigest()
 
 def verify_password(plain_password: str, hashed_password: str):
-    return pwd_context.verify(plain_password, hashed_password)
+    return hashlib.sha256(plain_password.encode()).hexdigest() == hashed_password
 
 # ================= AUTH ================= #
 
@@ -94,21 +93,16 @@ def predict(data: dict, user=Depends(get_current_user)):
 
     amount = data.get("amount", 0)
 
-    # 🔥 Fraud Logic
     fraud = amount > 10000
     risk = "HIGH" if amount > 20000 else "MEDIUM" if amount > 10000 else "LOW"
 
-    alert = None
-    if fraud:
-        alert = "⚠️ Suspicious transaction detected!"
+    alert = "⚠️ Suspicious transaction detected!" if fraud else None
 
-    # Save transaction
     cursor.execute(
         "INSERT INTO transactions (user_id, amount, fraud) VALUES (%s, %s, %s)",
         (user["sub"], amount, fraud)
     )
 
-    # 🚨 Auto blacklist
     if fraud:
         cursor.execute(
             "INSERT INTO blacklist (user_id, reason) VALUES (%s, %s)",
@@ -116,7 +110,6 @@ def predict(data: dict, user=Depends(get_current_user)):
         )
 
     conn.commit()
-
     cursor.close()
     conn.close()
 
@@ -126,7 +119,7 @@ def predict(data: dict, user=Depends(get_current_user)):
         "alert": alert
     }
 
-# ================= MANUAL TRANSACTION ================= #
+# ================= TRANSACTION ================= #
 
 @app.post("/transaction")
 def add_transaction(amount: float, user=Depends(get_current_user)):
@@ -141,7 +134,6 @@ def add_transaction(amount: float, user=Depends(get_current_user)):
     )
 
     conn.commit()
-
     cursor.close()
     conn.close()
 
@@ -193,7 +185,6 @@ def blacklist_user(user_id: str, reason: str, user=Depends(get_current_user)):
     )
 
     conn.commit()
-
     cursor.close()
     conn.close()
 
@@ -223,7 +214,6 @@ def remove_blacklist(user_id: str, user=Depends(get_current_user)):
     )
 
     conn.commit()
-
     cursor.close()
     conn.close()
 
