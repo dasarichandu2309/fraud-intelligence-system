@@ -1,42 +1,29 @@
-import psycopg2
-from passlib.context import CryptContext
-from db import get_connection
+from pydantic import BaseModel
 
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
-
-def hash_password(password):
-    return pwd_context.hash(password[:72])
+class UserCreate(BaseModel):
+    username: str
+    password: str
+    role: str = "analyst"
 
 
-def create_user(username, password, role):
+@app.post("/create_user")
+def create_user(user: UserCreate):
     conn = get_connection()
     cursor = conn.cursor()
 
-    hashed_password = hash_password(password)
+    hashed = hash_password(user.password)
 
     try:
-        cursor.execute("""
-        INSERT INTO users (username, password, role)
-        VALUES (%s, %s, %s)
-        """, (username, hashed_password, role))
-
+        cursor.execute(
+            "INSERT INTO users (username, password, role) VALUES (%s, %s, %s)",
+            (user.username, hashed, user.role)
+        )
         conn.commit()
-        print(f"✅ User '{username}' created as {role}")
-
     except Exception as e:
-        print("❌ Error:", e)
+        conn.rollback()
+        raise HTTPException(status_code=400, detail=str(e))
 
-    finally:
-        conn.close()
+    cursor.close()
+    conn.close()
 
-
-# =========================
-# CREATE USERS
-# =========================
-if __name__ == "__main__":
-
-    # 👑 Admin
-    create_user("admin", "admin123", "admin")
-
-    # 🧑‍💻 Analyst
-    create_user("analyst", "analyst123", "analyst")
+    return {"message": "User created successfully"}

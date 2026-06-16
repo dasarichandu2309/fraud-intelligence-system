@@ -57,12 +57,17 @@ def create_user(username: str, password: str, role: str = "analyst"):
 
 # ================= LOGIN ================= #
 
+class LoginRequest(BaseModel):
+    username: str
+    password: str
+
+
 @app.post("/login")
-def login(username: str, password: str):
+def login(data: LoginRequest):
     conn = get_connection()
     cursor = conn.cursor()
 
-    cursor.execute("SELECT * FROM users WHERE username=%s", (username,))
+    cursor.execute("SELECT * FROM users WHERE username=%s", (data.username,))
     user = cursor.fetchone()
 
     cursor.close()
@@ -71,7 +76,7 @@ def login(username: str, password: str):
     if not user:
         raise HTTPException(status_code=401, detail="Invalid credentials")
 
-    if not verify_password(password, user[2]):
+    if not verify_password(data.password, user[2]):
         raise HTTPException(status_code=401, detail="Invalid credentials")
 
     payload = {
