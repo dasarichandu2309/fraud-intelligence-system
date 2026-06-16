@@ -2,6 +2,7 @@ from fastapi import FastAPI, HTTPException, Depends
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from database import get_connection
 from jose import jwt, JWTError
+from pydantic import BaseModel
 import datetime
 import hashlib
 
