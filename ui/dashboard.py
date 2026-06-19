@@ -5,7 +5,7 @@ from jose import jwt
 
 API_URL = "https://fraud-api-mcgb.onrender.com"
 
-st.set_page_config(page_title="Fraud Detection", layout="wide")
+st.set_page_config(layout="wide")
 
 # ================= SESSION ================= #
 if "token" not in st.session_state:
@@ -14,48 +14,34 @@ if "token" not in st.session_state:
 if "role" not in st.session_state:
     st.session_state.role = None
 
-# ================= TITLE ================= #
 st.title("🏦 Fraud Detection System")
 
 # ================= LOGIN ================= #
 if st.session_state.token is None:
 
-    col1, col2, col3 = st.columns([1, 2, 1])
+    st.subheader("🔐 Login")
 
-    with col2:
-        st.subheader("🔐 Login")
+    username = st.text_input("Username")
+    password = st.text_input("Password", type="password")
 
-        username = st.text_input("Username")
-        password = st.text_input("Password", type="password")
+    if st.button("Login"):
 
-        if st.button("Login", use_container_width=True):
+        res = requests.post(
+            f"{API_URL}/login",
+            json={"username": username, "password": password}
+        )
 
-            if not username or not password:
-                st.warning("Enter username and password")
-            else:
-                try:
-                    res = requests.post(
-                        f"{API_URL}/login",
-                        json={
-                            "username": username,
-                            "password": password
-                        }
-                    )
+        if res.status_code == 200:
+            token = res.json()["access_token"]
+            st.session_state.token = token
 
-                    if res.status_code == 200:
-                        token = res.json()["access_token"]
-                        st.session_state.token = token
+            decoded = jwt.decode(token, "supersecretkey", algorithms=["HS256"])
+            st.session_state.role = decoded["role"]
 
-                        decoded = jwt.decode(token, "supersecretkey", algorithms=["HS256"])
-                        st.session_state.role = decoded.get("role", "user")
-
-                        st.success("Login successful ✅")
-                        st.rerun()
-                    else:
-                        st.error("Invalid credentials ❌")
-
-                except Exception as e:
-                    st.error(f"Error: {e}")
+            st.success("Login success")
+            st.rerun()
+        else:
+            st.error("Invalid credentials")
 
     st.stop()
 
@@ -63,39 +49,30 @@ if st.session_state.token is None:
 
 headers = {"Authorization": f"Bearer {st.session_state.token}"}
 
-decoded = jwt.decode(st.session_state.token, "supersecretkey", algorithms=["HS256"])
-user_id = decoded["sub"]
+st.sidebar.title("Dashboard")
+st.sidebar.write(f"Role: {st.session_state.role}")
 
-# Sidebar
-st.sidebar.title("📊 Dashboard")
-st.sidebar.write(f"👤 User: {user_id}")
-st.sidebar.write(f"🔐 Role: {st.session_state.role}")
+# 🔥 USER INPUT
+user_id = st.sidebar.text_input("Customer User ID", value="user1")
 
 menu = st.sidebar.selectbox(
     "Menu",
-    ["Predict", "Add Transaction", "History", "Audit Logs", "Logout"]
+    ["Predict", "Add Transaction", "History", "Blacklist", "Logout"]
 )
 
 # ================= PREDICT ================= #
 if menu == "Predict":
 
-    st.subheader("💳 Fraud Prediction")
+    st.subheader("Fraud Prediction")
 
-    st.write(f"User ID: **{user_id}**")
+    amount = st.number_input("Amount", 0.0)
+    hour = st.slider("Hour", 0, 23)
 
-    col1, col2 = st.columns(2)
-
-    with col1:
-        amount = st.number_input("Amount", 0.0)
-
-    with col2:
-        hour = st.slider("Hour", 0, 23)
-
-    if st.button("Check Fraud", use_container_width=True):
+    if st.button("Predict"):
 
         res = requests.post(
             f"{API_URL}/predict",
-            json={"amount": amount, "hour": hour},
+            json={"user_id": user_id, "amount": amount, "hour": hour},
             headers=headers
         )
 
@@ -103,82 +80,77 @@ if menu == "Predict":
             result = res.json()
 
             if result["fraud"]:
-                st.error("🚨 Fraud Detected")
+                st.error("Fraud Detected")
             else:
-                st.success("✅ Safe Transaction")
+                st.success("Safe")
 
-            st.info(f"Risk Level: {result['risk']}")
-
-            if result.get("alert"):
-                st.warning(result["alert"])
-
+            st.write("Risk:", result["risk"])
         else:
-            st.error("Unauthorized ❌")
+            st.error("Error")
 
-
-# ================= ADD TRANSACTION ================= #
+# ================= TRANSACTION ================= #
 elif menu == "Add Transaction":
 
-    st.subheader("➕ Add Transaction")
+    amount = st.number_input("Amount", 0.0)
 
-    st.write(f"User ID: **{user_id}**")
-
-    amount = st.number_input("Transaction Amount", 0.0)
-
-    if st.button("Add Transaction", use_container_width=True):
+    if st.button("Add Transaction"):
 
         res = requests.post(
             f"{API_URL}/transaction",
-            params={"amount": amount},
+            json={"user_id": user_id, "amount": amount},
             headers=headers
         )
 
         if res.status_code == 200:
-            result = res.json()
-
-            st.success("Transaction added successfully ✅")
-
-            if result["fraud"]:
-                st.warning("⚠️ This transaction is flagged as fraud")
-
+            st.success("Transaction added")
         else:
-            st.error("Failed to add transaction ❌")
-
+            st.error("Failed")
 
 # ================= HISTORY ================= #
 elif menu == "History":
 
-    st.subheader("📜 Transaction History")
-
-    st.write(f"User ID: **{user_id}**")
-
-    res = requests.get(f"{API_URL}/history", headers=headers)
+    res = requests.get(f"{API_URL}/history/{user_id}", headers=headers)
 
     if res.status_code == 200:
-        data = res.json().get("history", [])
-        st.dataframe(pd.DataFrame(data), use_container_width=True)
+        data = res.json()["history"]
+        st.dataframe(pd.DataFrame(data))
     else:
-        st.error("Failed to fetch history")
+        st.error("Error")
 
+# ================= BLACKLIST ================= #
+elif menu == "Blacklist":
 
-# ================= AUDIT LOGS ================= #
-elif menu == "Audit Logs":
+    st.subheader("Blacklist")
 
-    st.subheader("🧾 Audit Logs")
+    if st.button("Add to Blacklist"):
 
-    res = requests.get(f"{API_URL}/audit_logs", headers=headers)
+        requests.post(
+            f"{API_URL}/blacklist",
+            params={"user_id": user_id, "reason": "manual"},
+            headers=headers
+        )
+        st.success("User blacklisted")
 
-    if res.status_code == 200:
-        logs = res.json().get("logs", [])
-        st.dataframe(pd.DataFrame(logs), use_container_width=True)
+    # 🔥 ADMIN ONLY REMOVE
+    if st.session_state.role == "admin":
+
+        if st.button("Remove from Blacklist"):
+
+            res = requests.delete(
+                f"{API_URL}/blacklist/{user_id}",
+                headers=headers
+            )
+
+            if res.status_code == 200:
+                st.success("Removed from blacklist")
+            else:
+                st.error("Failed")
+
     else:
-        st.error("Failed to fetch logs")
-
+        st.info("Only admin can remove users")
 
 # ================= LOGOUT ================= #
 elif menu == "Logout":
-
     st.session_state.token = None
     st.session_state.role = None
-    st.success("Logged out successfully")
     st.rerun()

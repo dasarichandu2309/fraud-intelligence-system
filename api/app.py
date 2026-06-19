@@ -10,48 +10,17 @@ app = FastAPI()
 
 # ================= CONFIG ================= #
 security = HTTPBearer()
-
 SECRET_KEY = "supersecretkey"
 ALGORITHM = "HS256"
 
 # ================= PASSWORD ================= #
-
 def hash_password(password: str):
     return hashlib.sha256(password.encode()).hexdigest()
 
 def verify_password(plain_password: str, hashed_password: str):
     return hashlib.sha256(plain_password.encode()).hexdigest() == hashed_password
 
-# ================= SEED USERS (NEW) ================= #
-
-def seed_users():
-    conn = get_connection()
-    cursor = conn.cursor()
-
-    users = [
-        ("admin", hash_password("admin123"), "admin"),
-        ("analyst", hash_password("analyst123"), "analyst")
-    ]
-
-    for username, password, role in users:
-        cursor.execute("SELECT * FROM users WHERE username=%s", (username,))
-        if not cursor.fetchone():
-            cursor.execute(
-                "INSERT INTO users (username, password, role) VALUES (%s, %s, %s)",
-                (username, password, role)
-            )
-
-    conn.commit()
-    cursor.close()
-    conn.close()
-
-# 🔥 AUTO RUN ON STARTUP
-@app.on_event("startup")
-def startup_event():
-    seed_users()
-
 # ================= AUTH ================= #
-
 def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security)):
     token = credentials.credentials
     try:
@@ -61,7 +30,6 @@ def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(securit
         raise HTTPException(status_code=401, detail="Invalid token")
 
 # ================= LOGIN ================= #
-
 class LoginRequest(BaseModel):
     username: str
     password: str
@@ -77,69 +45,60 @@ def login(data: LoginRequest):
     cursor.close()
     conn.close()
 
-    if not user:
+    if not user or not verify_password(data.password, user[2]):
         raise HTTPException(status_code=401, detail="Invalid credentials")
 
-    if not verify_password(data.password, user[2]):
-        raise HTTPException(status_code=401, detail="Invalid credentials")
-
-    payload = {
+    token = jwt.encode({
         "sub": user[1],
         "role": user[3],
         "exp": datetime.datetime.utcnow() + datetime.timedelta(hours=5)
-    }
-
-    token = jwt.encode(payload, SECRET_KEY, algorithm=ALGORITHM)
+    }, SECRET_KEY, algorithm=ALGORITHM)
 
     return {"access_token": token}
 
 # ================= PREDICT ================= #
-
 @app.post("/predict")
 def predict(data: dict, user=Depends(get_current_user)):
     conn = get_connection()
     cursor = conn.cursor()
 
+    user_id = data.get("user_id")
     amount = data.get("amount", 0)
 
     fraud = amount > 10000
     risk = "HIGH" if amount > 20000 else "MEDIUM" if amount > 10000 else "LOW"
 
-    alert = "⚠️ Suspicious transaction detected!" if fraud else None
-
     cursor.execute(
         "INSERT INTO transactions (user_id, amount, fraud) VALUES (%s, %s, %s)",
-        (user["sub"], amount, fraud)
+        (user_id, amount, fraud)
     )
 
     if fraud:
         cursor.execute(
             "INSERT INTO blacklist (user_id, reason) VALUES (%s, %s)",
-            (user["sub"], "Fraud detected")
+            (user_id, "Fraud detected")
         )
 
     conn.commit()
     cursor.close()
     conn.close()
 
-    return {
-        "fraud": fraud,
-        "risk": risk,
-        "alert": alert
-    }
+    return {"fraud": fraud, "risk": risk}
 
 # ================= TRANSACTION ================= #
-
 @app.post("/transaction")
-def add_transaction(amount: float, user=Depends(get_current_user)):
+def add_transaction(data: dict, user=Depends(get_current_user)):
     conn = get_connection()
     cursor = conn.cursor()
+
+    user_id = data.get("user_id")
+    amount = data.get("amount", 0)
 
     fraud = amount > 10000
 
     cursor.execute(
         "INSERT INTO transactions (user_id, amount, fraud) VALUES (%s, %s, %s)",
-        (user["sub"], amount, fraud)
+        (user_id, amount, fraud)
     )
 
     conn.commit()
@@ -149,15 +108,14 @@ def add_transaction(amount: float, user=Depends(get_current_user)):
     return {"message": "Transaction added", "fraud": fraud}
 
 # ================= HISTORY ================= #
-
-@app.get("/history")
-def get_history(user=Depends(get_current_user)):
+@app.get("/history/{user_id}")
+def get_history(user_id: str, user=Depends(get_current_user)):
     conn = get_connection()
     cursor = conn.cursor()
 
     cursor.execute(
         "SELECT * FROM transactions WHERE user_id=%s ORDER BY id DESC",
-        (user["sub"],)
+        (user_id,)
     )
     data = cursor.fetchall()
 
@@ -166,23 +124,7 @@ def get_history(user=Depends(get_current_user)):
 
     return {"history": data}
 
-# ================= AUDIT LOGS ================= #
-
-@app.get("/audit_logs")
-def audit_logs(user=Depends(get_current_user)):
-    conn = get_connection()
-    cursor = conn.cursor()
-
-    cursor.execute("SELECT * FROM audit_logs ORDER BY time DESC")
-    logs = cursor.fetchall()
-
-    cursor.close()
-    conn.close()
-
-    return {"logs": logs}
-
 # ================= BLACKLIST ================= #
-
 @app.post("/blacklist")
 def blacklist_user(user_id: str, reason: str, user=Depends(get_current_user)):
     conn = get_connection()
@@ -199,28 +141,17 @@ def blacklist_user(user_id: str, reason: str, user=Depends(get_current_user)):
 
     return {"message": "User blacklisted"}
 
-@app.get("/blacklist")
-def get_blacklist(user=Depends(get_current_user)):
-    conn = get_connection()
-    cursor = conn.cursor()
-
-    cursor.execute("SELECT * FROM blacklist")
-    data = cursor.fetchall()
-
-    cursor.close()
-    conn.close()
-
-    return {"blacklist": data}
-
+# 🔥 ADMIN ONLY REMOVE
 @app.delete("/blacklist/{user_id}")
 def remove_blacklist(user_id: str, user=Depends(get_current_user)):
+
+    if user["role"] != "admin":
+        raise HTTPException(status_code=403, detail="Admin only")
+
     conn = get_connection()
     cursor = conn.cursor()
 
-    cursor.execute(
-        "DELETE FROM blacklist WHERE user_id=%s",
-        (user_id,)
-    )
+    cursor.execute("DELETE FROM blacklist WHERE user_id=%s", (user_id,))
 
     conn.commit()
     cursor.close()
@@ -228,51 +159,7 @@ def remove_blacklist(user_id: str, user=Depends(get_current_user)):
 
     return {"message": "Removed from blacklist"}
 
-# ================= STATS ================= #
-
-@app.get("/stats")
-def get_stats(user=Depends(get_current_user)):
-    conn = get_connection()
-    cursor = conn.cursor()
-
-    cursor.execute("SELECT fraud FROM transactions")
-    data = cursor.fetchall()
-
-    total = len(data)
-    fraud_count = sum(1 for d in data if d[0])
-    safe = total - fraud_count
-
-    cursor.close()
-    conn.close()
-
-    return {
-        "total": total,
-        "fraud": fraud_count,
-        "safe": safe
-    }
-
-# ================= KPI ================= #
-
-@app.get("/kpi")
-def kpi():
-    conn = get_connection()
-    cursor = conn.cursor()
-
-    cursor.execute("SELECT COUNT(*) FROM transactions")
-    total = cursor.fetchone()[0]
-
-    cursor.execute("SELECT COUNT(*) FROM transactions WHERE fraud=TRUE")
-    fraud = cursor.fetchone()[0]
-
-    cursor.close()
-    conn.close()
-
-    return {
-        "fraud_rate": round((fraud / total) * 100, 2) if total else 0
-    }
-
 # ================= ROOT ================= #
-
 @app.get("/")
 def home():
     return {"message": "Fraud Detection API running 🚀"}
