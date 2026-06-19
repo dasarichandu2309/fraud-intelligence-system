@@ -20,11 +20,27 @@ def hash_password(password: str):
 def verify_password(plain_password: str, hashed_password: str):
     return hashlib.sha256(plain_password.encode()).hexdigest() == hashed_password
 
-# ================= AUTO USER CREATION ================= #
-def seed_users():
+# ================= AUTH ================= #
+def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security)):
+    token = credentials.credentials
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        return payload
+    except JWTError:
+        raise HTTPException(status_code=401, detail="Invalid token")
+
+# ================= LOGIN MODEL ================= #
+class LoginRequest(BaseModel):
+    username: str
+    password: str
+
+# ================= LOGIN (WITH AUTO USER CREATION) ================= #
+@app.post("/login")
+def login(data: LoginRequest):
     conn = get_connection()
     cursor = conn.cursor()
 
+    # 🔥 ALWAYS ENSURE USERS EXIST (RENDER FIX)
     users = [
         ("admin", hash_password("admin123"), "admin"),
         ("analyst", hash_password("analyst123"), "analyst")
@@ -39,33 +55,8 @@ def seed_users():
             )
 
     conn.commit()
-    cursor.close()
-    conn.close()
 
-# 🔥 RUN ON STARTUP
-@app.on_event("startup")
-def startup_event():
-    seed_users()
-
-# ================= AUTH ================= #
-def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security)):
-    token = credentials.credentials
-    try:
-        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-        return payload
-    except JWTError:
-        raise HTTPException(status_code=401, detail="Invalid token")
-
-# ================= LOGIN ================= #
-class LoginRequest(BaseModel):
-    username: str
-    password: str
-
-@app.post("/login")
-def login(data: LoginRequest):
-    conn = get_connection()
-    cursor = conn.cursor()
-
+    # 🔐 LOGIN CHECK
     cursor.execute("SELECT * FROM users WHERE username=%s", (data.username,))
     user = cursor.fetchone()
 
