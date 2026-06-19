@@ -20,6 +20,33 @@ def hash_password(password: str):
 def verify_password(plain_password: str, hashed_password: str):
     return hashlib.sha256(plain_password.encode()).hexdigest() == hashed_password
 
+# ================= AUTO USER CREATION ================= #
+def seed_users():
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    users = [
+        ("admin", hash_password("admin123"), "admin"),
+        ("analyst", hash_password("analyst123"), "analyst")
+    ]
+
+    for username, password, role in users:
+        cursor.execute("SELECT * FROM users WHERE username=%s", (username,))
+        if not cursor.fetchone():
+            cursor.execute(
+                "INSERT INTO users (username, password, role) VALUES (%s, %s, %s)",
+                (username, password, role)
+            )
+
+    conn.commit()
+    cursor.close()
+    conn.close()
+
+# 🔥 RUN ON STARTUP
+@app.on_event("startup")
+def startup_event():
+    seed_users()
+
 # ================= AUTH ================= #
 def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security)):
     token = credentials.credentials
@@ -65,6 +92,9 @@ def predict(data: dict, user=Depends(get_current_user)):
     user_id = data.get("user_id")
     amount = data.get("amount", 0)
 
+    if not user_id:
+        raise HTTPException(status_code=400, detail="user_id required")
+
     fraud = amount > 10000
     risk = "HIGH" if amount > 20000 else "MEDIUM" if amount > 10000 else "LOW"
 
@@ -93,6 +123,9 @@ def add_transaction(data: dict, user=Depends(get_current_user)):
 
     user_id = data.get("user_id")
     amount = data.get("amount", 0)
+
+    if not user_id:
+        raise HTTPException(status_code=400, detail="user_id required")
 
     fraud = amount > 10000
 
