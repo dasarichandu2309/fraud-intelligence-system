@@ -5,31 +5,35 @@ from jose import jwt, JWTError
 from pydantic import BaseModel
 import datetime
 import hashlib
+import joblib
+import numpy as np
 
 app = FastAPI()
 
-# ================= CONFIG ================= #
+# CONFIG
 security = HTTPBearer()
 SECRET_KEY = "supersecretkey"
 ALGORITHM = "HS256"
 
-# ================= PASSWORD ================= #
+# LOAD MODELS
+fraud_model = joblib.load("fraud_model.pkl")
+anomaly_model = joblib.load("anomaly_model.pkl")
+
+# PASSWORD
 def hash_password(password: str):
     return hashlib.sha256(password.encode()).hexdigest()
 
-def verify_password(plain_password: str, hashed_password: str):
-    return hashlib.sha256(plain_password.encode()).hexdigest() == hashed_password
+def verify_password(password: str, hashed: str):
+    return hashlib.sha256(password.encode()).hexdigest() == hashed
 
-# ================= AUTH ================= #
+# AUTH
 def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security)):
-    token = credentials.credentials
     try:
-        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-        return payload
+        return jwt.decode(credentials.credentials, SECRET_KEY, algorithms=[ALGORITHM])
     except JWTError:
         raise HTTPException(status_code=401, detail="Invalid token")
 
-# ================= LOGIN ================= #
+# LOGIN
 class LoginRequest(BaseModel):
     username: str
     password: str
@@ -37,12 +41,12 @@ class LoginRequest(BaseModel):
 @app.post("/login")
 def login(data: LoginRequest):
     conn = get_connection()
-    cursor = conn.cursor()
+    cur = conn.cursor()
 
-    cursor.execute("SELECT * FROM users WHERE username=%s", (data.username,))
-    user = cursor.fetchone()
+    cur.execute("SELECT * FROM users WHERE username=%s", (data.username,))
+    user = cur.fetchone()
 
-    cursor.close()
+    cur.close()
     conn.close()
 
     if not user or not verify_password(data.password, user[2]):
@@ -59,153 +63,124 @@ def login(data: LoginRequest):
 # ================= PREDICT ================= #
 @app.post("/predict")
 def predict(data: dict, user=Depends(get_current_user)):
+
     conn = get_connection()
-    cursor = conn.cursor()
+    cur = conn.cursor()
 
     user_id = data.get("user_id")
     amount = data.get("amount", 0)
     hour = data.get("hour", 0)
 
-    if not user_id:
-        raise HTTPException(status_code=400, detail="user_id required")
+    X = np.array([[amount, hour]])
 
-    fraud = amount > 10000
-    risk = "HIGH" if amount > 20000 else "MEDIUM" if amount > 10000 else "LOW"
+    fraud_pred = fraud_model.predict(X)[0]
+    prob = fraud_model.predict_proba(X)[0][1]
 
-    cursor.execute(
-        "INSERT INTO history (user_id, amount, hour, fraud, risk) VALUES (%s, %s, %s, %s, %s)",
-        (user_id, amount, hour, fraud, risk)
+    anomaly_pred = anomaly_model.predict(X)[0]
+    is_anomaly = 1 if anomaly_pred == -1 else 0
+
+    # risk logic
+    if fraud_pred == 1 and is_anomaly == 1:
+        risk = "HIGH"
+    elif fraud_pred == 1:
+        risk = "MEDIUM"
+    elif is_anomaly == 1:
+        risk = "SUSPICIOUS"
+    else:
+        risk = "LOW"
+
+    # save
+    cur.execute(
+        "INSERT INTO history (user_id, amount, hour, fraud, risk) VALUES (%s,%s,%s,%s,%s)",
+        (user_id, amount, hour, int(fraud_pred), risk)
     )
 
-    if fraud:
-        cursor.execute(
-            "INSERT INTO blacklist (user_id, reason) VALUES (%s, %s)",
+    # ONLY blacklist (no email)
+    if risk in ["HIGH", "MEDIUM"]:
+        cur.execute(
+            "INSERT INTO blacklist (user_id, reason) VALUES (%s,%s)",
             (user_id, "Fraud detected")
         )
 
     conn.commit()
-    cursor.close()
+    cur.close()
     conn.close()
 
-    return {"fraud": fraud, "risk": risk}
-
-# ================= TRANSACTION ================= #
-@app.post("/transaction")
-def add_transaction(data: dict, user=Depends(get_current_user)):
-    conn = get_connection()
-    cursor = conn.cursor()
-
-    user_id = data.get("user_id")
-    amount = data.get("amount", 0)
-
-    fraud = amount > 10000
-
-    cursor.execute(
-        "INSERT INTO history (user_id, amount, hour, fraud, risk) VALUES (%s, %s, %s, %s, %s)",
-        (user_id, amount, 0, fraud, 0)
-    )
-
-    conn.commit()
-    cursor.close()
-    conn.close()
-
-    return {"message": "Transaction added", "fraud": fraud}
+    return {
+        "fraud": int(fraud_pred),
+        "anomaly": is_anomaly,
+        "probability": float(prob),
+        "risk": risk
+    }
 
 # ================= HISTORY ================= #
 @app.get("/history/{user_id}")
-def get_history(user_id: str, user=Depends(get_current_user)):
+def history(user_id: str, user=Depends(get_current_user)):
     conn = get_connection()
-    cursor = conn.cursor()
+    cur = conn.cursor()
 
-    cursor.execute(
-        "SELECT * FROM history WHERE user_id=%s ORDER BY id DESC",
-        (user_id,)
-    )
-    data = cursor.fetchall()
+    cur.execute("SELECT * FROM history WHERE user_id=%s ORDER BY id DESC", (user_id,))
+    data = cur.fetchall()
 
-    cursor.close()
+    cur.close()
     conn.close()
 
     return {"history": data}
 
-# ================= BLACKLIST ================= #
-@app.post("/blacklist")
-def blacklist_user(user_id: str, reason: str, user=Depends(get_current_user)):
+# ================= ALERTS ================= #
+@app.get("/alerts")
+def alerts(user=Depends(get_current_user)):
+
     conn = get_connection()
-    cursor = conn.cursor()
+    cur = conn.cursor()
 
-    cursor.execute(
-        "INSERT INTO blacklist (user_id, reason) VALUES (%s, %s)",
-        (user_id, reason)
-    )
+    cur.execute("""
+        SELECT user_id, amount, risk, time
+        FROM history
+        WHERE fraud = 1
+        ORDER BY time DESC
+        LIMIT 10
+    """)
 
-    conn.commit()
-    cursor.close()
+    data = cur.fetchall()
+
+    cur.close()
     conn.close()
 
-    return {"message": "User blacklisted"}
+    return {"alerts": data}
+
+# ================= BLACKLIST ================= #
+@app.post("/blacklist")
+def blacklist(user_id: str, reason: str, user=Depends(get_current_user)):
+    conn = get_connection()
+    cur = conn.cursor()
+
+    cur.execute("INSERT INTO blacklist (user_id, reason) VALUES (%s,%s)", (user_id, reason))
+
+    conn.commit()
+    cur.close()
+    conn.close()
+
+    return {"message": "Blacklisted"}
 
 @app.delete("/blacklist/{user_id}")
-def remove_blacklist(user_id: str, user=Depends(get_current_user)):
+def remove(user_id: str, user=Depends(get_current_user)):
 
     if user["role"] != "admin":
         raise HTTPException(status_code=403, detail="Admin only")
 
     conn = get_connection()
-    cursor = conn.cursor()
+    cur = conn.cursor()
 
-    cursor.execute("DELETE FROM blacklist WHERE user_id=%s", (user_id,))
-
+    cur.execute("DELETE FROM blacklist WHERE user_id=%s", (user_id,))
     conn.commit()
-    cursor.close()
+
+    cur.close()
     conn.close()
 
-    return {"message": "Removed from blacklist"}
-@app.get("/stats")
-def get_stats(user=Depends(get_current_user)):
-    conn = get_connection()
-    cursor = conn.cursor()
+    return {"message": "Removed"}
 
-    # total transactions
-    cursor.execute("SELECT COUNT(*) FROM history")
-    total = cursor.fetchone()[0]
-
-    # fraud count
-    cursor.execute("SELECT COUNT(*) FROM history WHERE fraud=TRUE")
-    fraud = cursor.fetchone()[0]
-
-    safe = total - fraud
-
-    # fraud by user
-    cursor.execute("""
-        SELECT user_id, COUNT(*) 
-        FROM history 
-        WHERE fraud=TRUE 
-        GROUP BY user_id
-    """)
-    fraud_users = cursor.fetchall()
-
-    # transactions over time
-    cursor.execute("""
-        SELECT DATE(time), COUNT(*) 
-        FROM history 
-        GROUP BY DATE(time)
-        ORDER BY DATE(time)
-    """)
-    trend = cursor.fetchall()
-
-    cursor.close()
-    conn.close()
-
-    return {
-        "total": total,
-        "fraud": fraud,
-        "safe": safe,
-        "fraud_users": fraud_users,
-        "trend": trend
-    }
-
-# ================= ROOT ================= #
+# ROOT
 @app.get("/")
 def home():
     return {"message": "Fraud Detection API running 🚀"}
