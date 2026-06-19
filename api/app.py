@@ -29,34 +29,16 @@ def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(securit
     except JWTError:
         raise HTTPException(status_code=401, detail="Invalid token")
 
-# ================= LOGIN MODEL ================= #
+# ================= LOGIN ================= #
 class LoginRequest(BaseModel):
     username: str
     password: str
 
-# ================= LOGIN (WITH AUTO USER CREATION) ================= #
 @app.post("/login")
 def login(data: LoginRequest):
     conn = get_connection()
     cursor = conn.cursor()
 
-    # 🔥 ALWAYS ENSURE USERS EXIST (RENDER FIX)
-    users = [
-        ("admin", hash_password("admin123"), "admin"),
-        ("analyst", hash_password("analyst123"), "analyst")
-    ]
-
-    for username, password, role in users:
-        cursor.execute("SELECT * FROM users WHERE username=%s", (username,))
-        if not cursor.fetchone():
-            cursor.execute(
-                "INSERT INTO users (username, password, role) VALUES (%s, %s, %s)",
-                (username, password, role)
-            )
-
-    conn.commit()
-
-    # 🔐 LOGIN CHECK
     cursor.execute("SELECT * FROM users WHERE username=%s", (data.username,))
     user = cursor.fetchone()
 
@@ -82,6 +64,7 @@ def predict(data: dict, user=Depends(get_current_user)):
 
     user_id = data.get("user_id")
     amount = data.get("amount", 0)
+    hour = data.get("hour", 0)
 
     if not user_id:
         raise HTTPException(status_code=400, detail="user_id required")
@@ -90,8 +73,8 @@ def predict(data: dict, user=Depends(get_current_user)):
     risk = "HIGH" if amount > 20000 else "MEDIUM" if amount > 10000 else "LOW"
 
     cursor.execute(
-        "INSERT INTO transactions (user_id, amount, fraud) VALUES (%s, %s, %s)",
-        (user_id, amount, fraud)
+        "INSERT INTO history (user_id, amount, hour, fraud, risk) VALUES (%s, %s, %s, %s, %s)",
+        (user_id, amount, hour, fraud, risk)
     )
 
     if fraud:
@@ -115,14 +98,11 @@ def add_transaction(data: dict, user=Depends(get_current_user)):
     user_id = data.get("user_id")
     amount = data.get("amount", 0)
 
-    if not user_id:
-        raise HTTPException(status_code=400, detail="user_id required")
-
     fraud = amount > 10000
 
     cursor.execute(
-        "INSERT INTO transactions (user_id, amount, fraud) VALUES (%s, %s, %s)",
-        (user_id, amount, fraud)
+        "INSERT INTO history (user_id, amount, hour, fraud, risk) VALUES (%s, %s, %s, %s, %s)",
+        (user_id, amount, 0, fraud, 0)
     )
 
     conn.commit()
@@ -138,7 +118,7 @@ def get_history(user_id: str, user=Depends(get_current_user)):
     cursor = conn.cursor()
 
     cursor.execute(
-        "SELECT * FROM transactions WHERE user_id=%s ORDER BY id DESC",
+        "SELECT * FROM history WHERE user_id=%s ORDER BY id DESC",
         (user_id,)
     )
     data = cursor.fetchall()
@@ -165,7 +145,6 @@ def blacklist_user(user_id: str, reason: str, user=Depends(get_current_user)):
 
     return {"message": "User blacklisted"}
 
-# 🔥 ADMIN ONLY REMOVE
 @app.delete("/blacklist/{user_id}")
 def remove_blacklist(user_id: str, user=Depends(get_current_user)):
 
@@ -182,6 +161,49 @@ def remove_blacklist(user_id: str, user=Depends(get_current_user)):
     conn.close()
 
     return {"message": "Removed from blacklist"}
+@app.get("/stats")
+def get_stats(user=Depends(get_current_user)):
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    # total transactions
+    cursor.execute("SELECT COUNT(*) FROM history")
+    total = cursor.fetchone()[0]
+
+    # fraud count
+    cursor.execute("SELECT COUNT(*) FROM history WHERE fraud=TRUE")
+    fraud = cursor.fetchone()[0]
+
+    safe = total - fraud
+
+    # fraud by user
+    cursor.execute("""
+        SELECT user_id, COUNT(*) 
+        FROM history 
+        WHERE fraud=TRUE 
+        GROUP BY user_id
+    """)
+    fraud_users = cursor.fetchall()
+
+    # transactions over time
+    cursor.execute("""
+        SELECT DATE(time), COUNT(*) 
+        FROM history 
+        GROUP BY DATE(time)
+        ORDER BY DATE(time)
+    """)
+    trend = cursor.fetchall()
+
+    cursor.close()
+    conn.close()
+
+    return {
+        "total": total,
+        "fraud": fraud,
+        "safe": safe,
+        "fraud_users": fraud_users,
+        "trend": trend
+    }
 
 # ================= ROOT ================= #
 @app.get("/")

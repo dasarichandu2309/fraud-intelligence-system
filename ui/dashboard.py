@@ -7,7 +7,7 @@ API_URL = "https://fraud-api-mcgb.onrender.com"
 
 st.set_page_config(layout="wide")
 
-# ================= SESSION ================= #
+# SESSION
 if "token" not in st.session_state:
     st.session_state.token = None
 
@@ -16,10 +16,8 @@ if "role" not in st.session_state:
 
 st.title("🏦 Fraud Detection System")
 
-# ================= LOGIN ================= #
+# LOGIN
 if st.session_state.token is None:
-
-    st.subheader("🔐 Login")
 
     username = st.text_input("Username")
     password = st.text_input("Password", type="password")
@@ -45,25 +43,50 @@ if st.session_state.token is None:
 
     st.stop()
 
-# ================= DASHBOARD ================= #
-
 headers = {"Authorization": f"Bearer {st.session_state.token}"}
 
-st.sidebar.title("Dashboard")
 st.sidebar.write(f"Role: {st.session_state.role}")
-
-# 🔥 USER INPUT
-user_id = st.sidebar.text_input("Customer User ID", value="user1")
+user_id = st.sidebar.text_input("Customer User ID", "user1")
 
 menu = st.sidebar.selectbox(
     "Menu",
-    ["Predict", "Add Transaction", "History", "Blacklist", "Logout"]
+    ["Dashboard", "Predict", "History", "Blacklist", "Logout"]
 )
 
-# ================= PREDICT ================= #
-if menu == "Predict":
+# ================= DASHBOARD ================= #
+if menu == "Dashboard":
 
-    st.subheader("Fraud Prediction")
+    st.subheader("📊 Analytics Dashboard")
+
+    res = requests.get(f"{API_URL}/stats", headers=headers)
+    data = res.json()
+
+    col1, col2, col3 = st.columns(3)
+
+    col1.metric("Total Transactions", data["total"])
+    col2.metric("Fraud Cases", data["fraud"])
+    col3.metric("Safe Transactions", data["safe"])
+
+    # PIE CHART
+    st.subheader("Fraud vs Safe")
+    pie_df = pd.DataFrame({
+        "Type": ["Fraud", "Safe"],
+        "Count": [data["fraud"], data["safe"]]
+    })
+    st.bar_chart(pie_df.set_index("Type"))
+
+    # TREND CHART
+    st.subheader("Transactions Over Time")
+    trend_df = pd.DataFrame(data["trend"], columns=["Date", "Count"])
+    st.line_chart(trend_df.set_index("Date"))
+
+    # FRAUD USERS
+    st.subheader("Fraud by Users")
+    user_df = pd.DataFrame(data["fraud_users"], columns=["User", "Fraud Count"])
+    st.bar_chart(user_df.set_index("User"))
+
+# ================= PREDICT ================= #
+elif menu == "Predict":
 
     amount = st.number_input("Amount", 0.0)
     hour = st.slider("Hour", 0, 23)
@@ -76,81 +99,38 @@ if menu == "Predict":
             headers=headers
         )
 
-        if res.status_code == 200:
-            result = res.json()
+        result = res.json()
 
-            if result["fraud"]:
-                st.error("Fraud Detected")
-            else:
-                st.success("Safe")
-
-            st.write("Risk:", result["risk"])
+        if result["fraud"]:
+            st.error("🚨 Fraud Detected")
         else:
-            st.error("Error")
+            st.success("✅ Safe")
 
-# ================= TRANSACTION ================= #
-elif menu == "Add Transaction":
-
-    amount = st.number_input("Amount", 0.0)
-
-    if st.button("Add Transaction"):
-
-        res = requests.post(
-            f"{API_URL}/transaction",
-            json={"user_id": user_id, "amount": amount},
-            headers=headers
-        )
-
-        if res.status_code == 200:
-            st.success("Transaction added")
-        else:
-            st.error("Failed")
+        st.write("Risk:", result["risk"])
 
 # ================= HISTORY ================= #
 elif menu == "History":
 
     res = requests.get(f"{API_URL}/history/{user_id}", headers=headers)
-
-    if res.status_code == 200:
-        data = res.json()["history"]
-        st.dataframe(pd.DataFrame(data))
-    else:
-        st.error("Error")
+    st.dataframe(pd.DataFrame(res.json()["history"]))
 
 # ================= BLACKLIST ================= #
 elif menu == "Blacklist":
 
-    st.subheader("Blacklist")
-
     if st.button("Add to Blacklist"):
-
         requests.post(
             f"{API_URL}/blacklist",
             params={"user_id": user_id, "reason": "manual"},
             headers=headers
         )
-        st.success("User blacklisted")
+        st.success("Blacklisted")
 
-    # 🔥 ADMIN ONLY REMOVE
     if st.session_state.role == "admin":
-
-        if st.button("Remove from Blacklist"):
-
-            res = requests.delete(
-                f"{API_URL}/blacklist/{user_id}",
-                headers=headers
-            )
-
-            if res.status_code == 200:
-                st.success("Removed from blacklist")
-            else:
-                st.error("Failed")
-
-    else:
-        st.info("Only admin can remove users")
+        if st.button("Remove"):
+            requests.delete(f"{API_URL}/blacklist/{user_id}", headers=headers)
+            st.success("Removed")
 
 # ================= LOGOUT ================= #
 elif menu == "Logout":
     st.session_state.token = None
-    st.session_state.role = None
     st.rerun()
