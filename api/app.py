@@ -14,13 +14,41 @@ security = HTTPBearer()
 SECRET_KEY = "supersecretkey"
 ALGORITHM = "HS256"
 
-# ================= PASSWORD (FINAL FIX) ================= #
+# ================= PASSWORD ================= #
 
 def hash_password(password: str):
     return hashlib.sha256(password.encode()).hexdigest()
 
 def verify_password(plain_password: str, hashed_password: str):
     return hashlib.sha256(plain_password.encode()).hexdigest() == hashed_password
+
+# ================= SEED USERS (NEW) ================= #
+
+def seed_users():
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    users = [
+        ("admin", hash_password("admin123"), "admin"),
+        ("analyst", hash_password("analyst123"), "analyst")
+    ]
+
+    for username, password, role in users:
+        cursor.execute("SELECT * FROM users WHERE username=%s", (username,))
+        if not cursor.fetchone():
+            cursor.execute(
+                "INSERT INTO users (username, password, role) VALUES (%s, %s, %s)",
+                (username, password, role)
+            )
+
+    conn.commit()
+    cursor.close()
+    conn.close()
+
+# 🔥 AUTO RUN ON STARTUP
+@app.on_event("startup")
+def startup_event():
+    seed_users()
 
 # ================= AUTH ================= #
 
@@ -32,36 +60,11 @@ def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(securit
     except JWTError:
         raise HTTPException(status_code=401, detail="Invalid token")
 
-# ================= CREATE USER ================= #
-
-@app.post("/create_user")
-def create_user(username: str, password: str, role: str = "analyst"):
-    conn = get_connection()
-    cursor = conn.cursor()
-
-    hashed = hash_password(password)
-
-    try:
-        cursor.execute(
-            "INSERT INTO users (username, password, role) VALUES (%s, %s, %s)",
-            (username, hashed, role)
-        )
-        conn.commit()
-    except Exception as e:
-        conn.rollback()
-        raise HTTPException(status_code=400, detail=str(e))
-
-    cursor.close()
-    conn.close()
-
-    return {"message": "User created successfully"}
-
 # ================= LOGIN ================= #
 
 class LoginRequest(BaseModel):
     username: str
     password: str
-
 
 @app.post("/login")
 def login(data: LoginRequest):
