@@ -78,6 +78,7 @@ def login(data: LoginRequest):
         "user": user[1],
         "role": user[3]
     }
+print("🔥 NEW LOGIN CODE RUNNING")
 
 # ================= PREDICT ================= #
 @app.post("/predict")
