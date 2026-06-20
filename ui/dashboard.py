@@ -21,7 +21,7 @@ st.title("🏦 Fraud Intelligence System")
 # ================= LOGIN ================= #
 if st.session_state.token is None:
 
-    st.subheader("🔐 Secure Login")
+    st.subheader("🔐 Login")
 
     username = st.text_input("Username")
     password = st.text_input("Password", type="password")
@@ -29,7 +29,7 @@ if st.session_state.token is None:
     if st.button("Login"):
 
         if not username or not password:
-            st.warning("Enter username & password")
+            st.warning("Enter credentials")
         else:
             try:
                 res = requests.post(
@@ -38,44 +38,46 @@ if st.session_state.token is None:
                 )
 
                 if res.status_code == 200:
-                    token = res.json()["access_token"]
-                    st.session_state.token = token
+                    data = res.json()
 
-                    decoded = jwt.decode(token, "supersecretkey", algorithms=["HS256"])
-                    st.session_state.role = decoded.get("role")
-                    st.session_state.user = decoded.get("sub")
+                    st.session_state.token = data["access_token"]
 
-                    st.success("Login successful ✅")
+                    decoded = jwt.decode(
+                        st.session_state.token,
+                        "supersecretkey",
+                        algorithms=["HS256"]
+                    )
+
+                    st.session_state.role = decoded["role"]
+                    st.session_state.user = decoded["sub"]
+
+                    st.success("Login success ✅")
                     st.rerun()
 
-                elif res.status_code == 401:
-                    st.error("Invalid username or password ❌")
-
                 else:
-                    st.error("Server error")
+                    st.error(f"Login failed ❌ ({res.status_code})")
+                    st.write(res.text)
 
             except Exception as e:
-                st.error(f"Connection error: {e}")
+                st.error(f"Error: {e}")
 
     st.stop()
 
 # ================= TOKEN CHECK ================= #
 headers = {"Authorization": f"Bearer {st.session_state.token}"}
 
-# 🔥 AUTO LOGOUT IF TOKEN EXPIRED
 try:
     jwt.decode(st.session_state.token, "supersecretkey", algorithms=["HS256"])
 except JWTError:
-    st.session_state.token = None
+    st.session_state.clear()
     st.error("Session expired. Login again.")
     st.rerun()
 
 # ================= SIDEBAR ================= #
-st.sidebar.title("🧠 Fraud Dashboard")
-st.sidebar.write(f"👤 User: {st.session_state.user}")
-st.sidebar.write(f"🔐 Role: {st.session_state.role}")
+st.sidebar.title("Dashboard")
+st.sidebar.write(f"👤 {st.session_state.user}")
+st.sidebar.write(f"🔐 {st.session_state.role}")
 
-# 🔥 ROLE-BASED MENU
 menu_options = ["Predict", "Alerts", "History"]
 
 if st.session_state.role == "admin":
@@ -85,18 +87,17 @@ menu_options.append("Logout")
 
 menu = st.sidebar.selectbox("Menu", menu_options)
 
-# ================= USER INPUT ================= #
 user_id = st.sidebar.text_input("Customer User ID", "user1")
 
 # ================= PREDICT ================= #
 if menu == "Predict":
 
-    st.subheader("🔍 Fraud Prediction")
+    st.subheader("Fraud Prediction")
 
     amount = st.number_input("Amount", 0.0)
     hour = st.slider("Hour", 0, 23)
 
-    if st.button("Analyze Transaction"):
+    if st.button("Predict"):
 
         res = requests.post(
             f"{API_URL}/predict",
@@ -104,94 +105,88 @@ if menu == "Predict":
             headers=headers
         )
 
-        if res.status_code == 401:
-            st.error("Session expired")
-            st.session_state.token = None
-            st.rerun()
+        if res.status_code == 200:
+            result = res.json()
 
-        result = res.json()
+            prob = result["probability"]
+            risk = result["risk"]
 
-        prob = result["probability"]
-        risk = result["risk"]
+            if risk == "HIGH":
+                st.error("🔴 HIGH RISK")
+            elif risk == "MEDIUM":
+                st.warning("🟠 MEDIUM RISK")
+            elif risk == "SUSPICIOUS":
+                st.info("🟡 SUSPICIOUS")
+            else:
+                st.success("🟢 SAFE")
 
-        # 🎯 Risk Display
-        if risk == "HIGH":
-            st.error("🔴 HIGH RISK FRAUD")
-        elif risk == "MEDIUM":
-            st.warning("🟠 MEDIUM RISK")
-        elif risk == "SUSPICIOUS":
-            st.info("🟡 SUSPICIOUS")
+            st.progress(prob)
+            st.metric("Fraud Probability", f"{prob*100:.2f}%")
+
         else:
-            st.success("🟢 SAFE")
-
-        # 🎯 Probability Gauge
-        st.progress(prob)
-        st.metric("Fraud Probability", f"{prob*100:.2f}%")
+            st.error(f"API Error: {res.status_code}")
+            st.write(res.text)
 
 # ================= ALERTS ================= #
 elif menu == "Alerts":
 
-    st.title("🚨 Live Fraud Alerts")
+    st.subheader("🚨 Live Alerts")
 
     res = requests.get(f"{API_URL}/alerts", headers=headers)
 
-    if res.status_code == 401:
-        st.session_state.token = None
-        st.rerun()
+    if res.status_code == 200:
+        alerts = res.json().get("alerts", [])
 
-    alerts = res.json().get("alerts", [])
+        if alerts:
+            df = pd.DataFrame(alerts, columns=["User", "Amount", "Risk", "Time"])
+            st.dataframe(df)
+        else:
+            st.success("No alerts")
 
-    if alerts:
-        df = pd.DataFrame(alerts, columns=["User", "Amount", "Risk", "Time"])
-        st.dataframe(df)
-
-        for row in alerts:
-            if row[2] == "HIGH":
-                st.error(f"🚨 HIGH: {row[0]} ₹{row[1]}")
     else:
-        st.success("No fraud alerts")
+        st.error(f"Error: {res.status_code}")
+        st.write(res.text)
 
-    # 🔥 AUTO REFRESH
     time.sleep(3)
     st.rerun()
 
 # ================= HISTORY ================= #
 elif menu == "History":
 
-    st.subheader("📜 Transaction History")
+    st.subheader("Transaction History")
 
     res = requests.get(f"{API_URL}/history/{user_id}", headers=headers)
 
-    if res.status_code == 401:
-        st.session_state.token = None
-        st.rerun()
+    if res.status_code == 200:
+        data = res.json().get("history", [])
+        st.dataframe(pd.DataFrame(data))
+    else:
+        st.error(f"Error: {res.status_code}")
+        st.write(res.text)
 
-    data = res.json().get("history", [])
-    st.dataframe(pd.DataFrame(data))
-
-# ================= BLACKLIST (ADMIN ONLY) ================= #
+# ================= BLACKLIST ================= #
 elif menu == "Blacklist":
 
-    st.subheader("🚫 Blacklist Control")
-
     if st.session_state.role != "admin":
-        st.error("Access Denied")
+        st.error("Access denied")
         st.stop()
 
+    st.subheader("Blacklist Control")
+
     if st.button("Add to Blacklist"):
-        requests.post(
+        res = requests.post(
             f"{API_URL}/blacklist",
             params={"user_id": user_id, "reason": "manual"},
             headers=headers
         )
-        st.success("User Blacklisted")
+        st.success("User blacklisted")
 
     if st.button("Remove from Blacklist"):
-        requests.delete(
+        res = requests.delete(
             f"{API_URL}/blacklist/{user_id}",
             headers=headers
         )
-        st.success("Removed from Blacklist")
+        st.success("Removed from blacklist")
 
 # ================= LOGOUT ================= #
 elif menu == "Logout":
