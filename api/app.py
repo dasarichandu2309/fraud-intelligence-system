@@ -180,6 +180,18 @@ def remove(user_id: str, user=Depends(get_current_user)):
 
     return {"message": "Removed"}
 
+@app.get("/debug_users")
+def debug_users():
+    conn = get_connection()
+    cur = conn.cursor()
+
+    cur.execute("SELECT * FROM users")
+    data = cur.fetchall()
+
+    cur.close()
+    conn.close()
+
+    return {"users": data}
 # ROOT
 @app.get("/")
 def home():
