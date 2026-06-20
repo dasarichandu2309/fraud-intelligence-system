@@ -10,46 +10,53 @@ import numpy as np
 
 app = FastAPI()
 
-# CONFIG
+# ================= CONFIG ================= #
 security = HTTPBearer()
 SECRET_KEY = "supersecretkey"
 ALGORITHM = "HS256"
 
-# LOAD MODELS
+# ================= LOAD MODELS ================= #
 fraud_model = joblib.load("fraud_model.pkl")
 anomaly_model = joblib.load("anomaly_model.pkl")
 
-# PASSWORD
+# ================= PASSWORD ================= #
 def hash_password(password: str):
     return hashlib.sha256(password.encode()).hexdigest()
 
 def verify_password(password: str, hashed: str):
-    return hashlib.sha256(password.encode()).hexdigest() == hashed
+    return hash_password(password) == hashed.strip()
 
-# AUTH
+# ================= AUTH ================= #
 def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security)):
     try:
-        return jwt.decode(credentials.credentials, SECRET_KEY, algorithms=[ALGORITHM])
+        payload = jwt.decode(credentials.credentials, SECRET_KEY, algorithms=[ALGORITHM])
+        return payload
     except JWTError:
-        raise HTTPException(status_code=401, detail="Invalid token")
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
 
-# LOGIN
+# ================= LOGIN ================= #
 class LoginRequest(BaseModel):
     username: str
     password: str
 
 @app.post("/login")
 def login(data: LoginRequest):
+
     conn = get_connection()
     cur = conn.cursor()
 
-    cur.execute("SELECT * FROM users WHERE username=%s", (data.username,))
+    # 🔥 FIX: trim username
+    cur.execute("SELECT * FROM users WHERE username=%s", (data.username.strip(),))
     user = cur.fetchone()
 
     cur.close()
     conn.close()
 
-    if not user or not verify_password(data.password, user[2]):
+    if not user:
+        raise HTTPException(status_code=401, detail="User not found")
+
+    # 🔥 DEBUG SAFE CHECK
+    if not verify_password(data.password, user[2]):
         raise HTTPException(status_code=401, detail="Invalid credentials")
 
     token = jwt.encode({
@@ -58,7 +65,11 @@ def login(data: LoginRequest):
         "exp": datetime.datetime.utcnow() + datetime.timedelta(hours=5)
     }, SECRET_KEY, algorithm=ALGORITHM)
 
-    return {"access_token": token}
+    return {
+        "access_token": token,
+        "user": user[1],
+        "role": user[3]
+    }
 
 # ================= PREDICT ================= #
 @app.post("/predict")
@@ -68,38 +79,41 @@ def predict(data: dict, user=Depends(get_current_user)):
     cur = conn.cursor()
 
     user_id = data.get("user_id")
-    amount = data.get("amount", 0)
-    hour = data.get("hour", 0)
+    amount = float(data.get("amount", 0))
+    hour = int(data.get("hour", 0))
+
+    if not user_id:
+        raise HTTPException(status_code=400, detail="user_id required")
 
     X = np.array([[amount, hour]])
 
-    fraud_pred = fraud_model.predict(X)[0]
-    prob = fraud_model.predict_proba(X)[0][1]
+    fraud_pred = int(fraud_model.predict(X)[0])
+    prob = float(fraud_model.predict_proba(X)[0][1])
 
     anomaly_pred = anomaly_model.predict(X)[0]
     is_anomaly = 1 if anomaly_pred == -1 else 0
 
-    # risk logic
-    if fraud_pred == 1 and is_anomaly == 1:
+    # 🔥 BETTER RISK LOGIC
+    if prob > 0.8:
         risk = "HIGH"
-    elif fraud_pred == 1:
+    elif prob > 0.5:
         risk = "MEDIUM"
-    elif is_anomaly == 1:
+    elif is_anomaly:
         risk = "SUSPICIOUS"
     else:
         risk = "LOW"
 
-    # save
+    # SAVE HISTORY
     cur.execute(
         "INSERT INTO history (user_id, amount, hour, fraud, risk) VALUES (%s,%s,%s,%s,%s)",
-        (user_id, amount, hour, int(fraud_pred), risk)
+        (user_id, amount, hour, fraud_pred, risk)
     )
 
-    # ONLY blacklist (no email)
-    if risk in ["HIGH", "MEDIUM"]:
+    # AUTO BLACKLIST
+    if risk == "HIGH":
         cur.execute(
             "INSERT INTO blacklist (user_id, reason) VALUES (%s,%s)",
-            (user_id, "Fraud detected")
+            (user_id, "High risk fraud")
         )
 
     conn.commit()
@@ -107,19 +121,23 @@ def predict(data: dict, user=Depends(get_current_user)):
     conn.close()
 
     return {
-        "fraud": int(fraud_pred),
+        "fraud": fraud_pred,
         "anomaly": is_anomaly,
-        "probability": float(prob),
+        "probability": prob,
         "risk": risk
     }
 
 # ================= HISTORY ================= #
 @app.get("/history/{user_id}")
 def history(user_id: str, user=Depends(get_current_user)):
+
     conn = get_connection()
     cur = conn.cursor()
 
-    cur.execute("SELECT * FROM history WHERE user_id=%s ORDER BY id DESC", (user_id,))
+    cur.execute(
+        "SELECT * FROM history WHERE user_id=%s ORDER BY id DESC",
+        (user_id,)
+    )
     data = cur.fetchall()
 
     cur.close()
@@ -137,7 +155,7 @@ def alerts(user=Depends(get_current_user)):
     cur.execute("""
         SELECT user_id, amount, risk, time
         FROM history
-        WHERE fraud = 1
+        WHERE risk IN ('HIGH','MEDIUM')
         ORDER BY time DESC
         LIMIT 10
     """)
@@ -152,16 +170,20 @@ def alerts(user=Depends(get_current_user)):
 # ================= BLACKLIST ================= #
 @app.post("/blacklist")
 def blacklist(user_id: str, reason: str, user=Depends(get_current_user)):
+
     conn = get_connection()
     cur = conn.cursor()
 
-    cur.execute("INSERT INTO blacklist (user_id, reason) VALUES (%s,%s)", (user_id, reason))
+    cur.execute(
+        "INSERT INTO blacklist (user_id, reason) VALUES (%s,%s)",
+        (user_id, reason)
+    )
 
     conn.commit()
     cur.close()
     conn.close()
 
-    return {"message": "Blacklisted"}
+    return {"message": "User blacklisted"}
 
 @app.delete("/blacklist/{user_id}")
 def remove(user_id: str, user=Depends(get_current_user)):
@@ -178,21 +200,24 @@ def remove(user_id: str, user=Depends(get_current_user)):
     cur.close()
     conn.close()
 
-    return {"message": "Removed"}
+    return {"message": "Removed from blacklist"}
 
+# ================= DEBUG ================= #
 @app.get("/debug_users")
 def debug_users():
+
     conn = get_connection()
     cur = conn.cursor()
 
-    cur.execute("SELECT * FROM users")
+    cur.execute("SELECT id, username, role FROM users")
     data = cur.fetchall()
 
     cur.close()
     conn.close()
 
     return {"users": data}
-# ROOT
+
+# ================= ROOT ================= #
 @app.get("/")
 def home():
     return {"message": "Fraud Detection API running 🚀"}
