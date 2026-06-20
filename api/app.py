@@ -48,7 +48,7 @@ def login(data: LoginRequest):
     conn = get_connection()
     cur = conn.cursor()
 
-    cur.execute("SELECT * FROM users WHERE username=%s", (data.username.strip(),))
+    cur.execute("SELECT username, password, role FROM users WHERE username=%s", (data.username.strip(),))
     user = cur.fetchone()
 
     cur.close()
@@ -57,28 +57,32 @@ def login(data: LoginRequest):
     if not user:
         raise HTTPException(status_code=401, detail="User not found")
 
-    # 🔥 DIRECT HASH COMPARISON (NO FUNCTION)
-    input_hash = hashlib.sha256(data.password.encode()).hexdigest()
-    db_hash = str(user[2]).strip()
+    username, db_password, role = user
 
-    print("INPUT HASH:", input_hash)
-    print("DB HASH:", db_hash)
+    # 🔥 CLEAN EVERYTHING
+    input_hash = hashlib.sha256(data.password.encode()).hexdigest().strip()
+    db_hash = str(db_password).strip()
 
+    # 🔥 DEBUG PRINT (IMPORTANT)
+    print("INPUT HASH:", repr(input_hash))
+    print("DB HASH:", repr(db_hash))
+
+    # 🔥 FINAL MATCH
     if input_hash != db_hash:
         raise HTTPException(status_code=401, detail="Invalid credentials")
 
     token = jwt.encode({
-        "sub": user[1],
-        "role": user[3],
+        "sub": username,
+        "role": role,
         "exp": datetime.datetime.utcnow() + datetime.timedelta(hours=5)
     }, SECRET_KEY, algorithm=ALGORITHM)
 
     return {
         "access_token": token,
-        "user": user[1],
-        "role": user[3]
+        "user": username,
+        "role": role
     }
-print("🔥 NEW LOGIN CODE RUNNING")
+print("🔥 NEW LOGIN CODE RUNNING1")
 
 # ================= PREDICT ================= #
 @app.post("/predict")
