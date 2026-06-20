@@ -48,7 +48,6 @@ def login(data: LoginRequest):
     conn = get_connection()
     cur = conn.cursor()
 
-    # 🔥 TRIM username to avoid space issues
     cur.execute("SELECT * FROM users WHERE username=%s", (data.username.strip(),))
     user = cur.fetchone()
 
@@ -58,8 +57,14 @@ def login(data: LoginRequest):
     if not user:
         raise HTTPException(status_code=401, detail="User not found")
 
-    # 🔥 CLEAN PASSWORD COMPARISON
-    if not verify_password(data.password, user[2]):
+    # 🔥 DIRECT HASH COMPARISON (NO FUNCTION)
+    input_hash = hashlib.sha256(data.password.encode()).hexdigest()
+    db_hash = str(user[2]).strip()
+
+    print("INPUT HASH:", input_hash)
+    print("DB HASH:", db_hash)
+
+    if input_hash != db_hash:
         raise HTTPException(status_code=401, detail="Invalid credentials")
 
     token = jwt.encode({
