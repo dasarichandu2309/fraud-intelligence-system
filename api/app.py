@@ -16,18 +16,18 @@ SECRET_KEY = "supersecretkey"
 ALGORITHM = "HS256"
 
 # ================= LOAD MODELS ================= #
-fraud_model = joblib.load("fraud_model.pkl")
-anomaly_model = joblib.load("anomaly_model.pkl")
+try:
+    fraud_model = joblib.load("fraud_model.pkl")
+    anomaly_model = joblib.load("anomaly_model.pkl")
+    print("✅ Models loaded successfully")
+except Exception as e:
+    print("❌ Model load failed:", e)
+    fraud_model = None
+    anomaly_model = None
 
 # ================= PASSWORD ================= #
 def hash_password(password: str):
     return hashlib.sha256(password.encode()).hexdigest()
-
-# 🔥 FINAL FIXED VERIFY FUNCTION
-def verify_password(password: str, hashed: str):
-    input_hash = hashlib.sha256(password.encode()).hexdigest().strip()
-    db_hash = str(hashed).strip()
-    return input_hash == db_hash
 
 # ================= AUTH ================= #
 def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security)):
@@ -35,7 +35,7 @@ def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(securit
         payload = jwt.decode(credentials.credentials, SECRET_KEY, algorithms=[ALGORITHM])
         return payload
     except JWTError:
-        raise HTTPException(status_code=401, detail="Invalid or expired token")
+        raise HTTPException(status_code=401, detail="Invalid token")
 
 # ================= LOGIN ================= #
 class LoginRequest(BaseModel):
@@ -59,15 +59,12 @@ def login(data: LoginRequest):
 
     username, db_password, role = user
 
-    # 🔥 CLEAN EVERYTHING
     input_hash = hashlib.sha256(data.password.encode()).hexdigest().strip()
     db_hash = str(db_password).strip()
 
-    # 🔥 DEBUG PRINT (IMPORTANT)
-    print("INPUT HASH:", repr(input_hash))
-    print("DB HASH:", repr(db_hash))
+    print("INPUT HASH:", input_hash)
+    print("DB HASH:", db_hash)
 
-    # 🔥 FINAL MATCH
     if input_hash != db_hash:
         raise HTTPException(status_code=401, detail="Invalid credentials")
 
@@ -82,11 +79,13 @@ def login(data: LoginRequest):
         "user": username,
         "role": role
     }
-print("🔥 NEW LOGIN CODE RUNNING1")
 
 # ================= PREDICT ================= #
 @app.post("/predict")
 def predict(data: dict, user=Depends(get_current_user)):
+
+    if fraud_model is None:
+        raise HTTPException(status_code=500, detail="Model not loaded")
 
     conn = get_connection()
     cur = conn.cursor()
@@ -95,18 +94,20 @@ def predict(data: dict, user=Depends(get_current_user)):
     amount = float(data.get("amount", 0))
     hour = int(data.get("hour", 0))
 
-    if not user_id:
-        raise HTTPException(status_code=400, detail="user_id required")
+    try:
+        # 🔥 FIX: match model expected 6 features
+        X = np.array([[amount, hour, 0, 0, 0, 0]])
 
-    X = np.array([[amount, hour]])
+        fraud_pred = int(fraud_model.predict(X)[0])
+        prob = float(fraud_model.predict_proba(X)[0][1])
 
-    fraud_pred = int(fraud_model.predict(X)[0])
-    prob = float(fraud_model.predict_proba(X)[0][1])
+        anomaly_pred = anomaly_model.predict(X)[0]
+        is_anomaly = 1 if anomaly_pred == -1 else 0
 
-    anomaly_pred = anomaly_model.predict(X)[0]
-    is_anomaly = 1 if anomaly_pred == -1 else 0
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
-    # 🔥 BETTER RISK LOGIC
+    # ================= RISK LOGIC ================= #
     if prob > 0.8:
         risk = "HIGH"
     elif prob > 0.5:
@@ -116,13 +117,12 @@ def predict(data: dict, user=Depends(get_current_user)):
     else:
         risk = "LOW"
 
-    # SAVE HISTORY
+    # ================= SAVE ================= #
     cur.execute(
         "INSERT INTO history (user_id, amount, hour, fraud, risk) VALUES (%s,%s,%s,%s,%s)",
         (user_id, amount, hour, fraud_pred, risk)
     )
 
-    # AUTO BLACKLIST
     if risk == "HIGH":
         cur.execute(
             "INSERT INTO blacklist (user_id, reason) VALUES (%s,%s)",
@@ -147,10 +147,7 @@ def history(user_id: str, user=Depends(get_current_user)):
     conn = get_connection()
     cur = conn.cursor()
 
-    cur.execute(
-        "SELECT * FROM history WHERE user_id=%s ORDER BY id DESC",
-        (user_id,)
-    )
+    cur.execute("SELECT * FROM history WHERE user_id=%s ORDER BY id DESC", (user_id,))
     data = cur.fetchall()
 
     cur.close()
@@ -187,10 +184,7 @@ def blacklist(user_id: str, reason: str, user=Depends(get_current_user)):
     conn = get_connection()
     cur = conn.cursor()
 
-    cur.execute(
-        "INSERT INTO blacklist (user_id, reason) VALUES (%s,%s)",
-        (user_id, reason)
-    )
+    cur.execute("INSERT INTO blacklist (user_id, reason) VALUES (%s,%s)", (user_id, reason))
 
     conn.commit()
     cur.close()
@@ -214,21 +208,6 @@ def remove(user_id: str, user=Depends(get_current_user)):
     conn.close()
 
     return {"message": "Removed from blacklist"}
-
-# ================= DEBUG ================= #
-@app.get("/debug_users")
-def debug_users():
-
-    conn = get_connection()
-    cur = conn.cursor()
-
-    cur.execute("SELECT id, username, password, role FROM users")
-    data = cur.fetchall()
-
-    cur.close()
-    conn.close()
-
-    return {"users": data}
 
 # ================= ROOT ================= #
 @app.get("/")
