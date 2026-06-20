@@ -23,8 +23,11 @@ anomaly_model = joblib.load("anomaly_model.pkl")
 def hash_password(password: str):
     return hashlib.sha256(password.encode()).hexdigest()
 
+# 🔥 FINAL FIXED VERIFY FUNCTION
 def verify_password(password: str, hashed: str):
-    return hash_password(password) == hashed.strip()
+    input_hash = hashlib.sha256(password.encode()).hexdigest().strip()
+    db_hash = str(hashed).strip()
+    return input_hash == db_hash
 
 # ================= AUTH ================= #
 def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security)):
@@ -45,7 +48,7 @@ def login(data: LoginRequest):
     conn = get_connection()
     cur = conn.cursor()
 
-    # 🔥 FIX: trim username
+    # 🔥 TRIM username to avoid space issues
     cur.execute("SELECT * FROM users WHERE username=%s", (data.username.strip(),))
     user = cur.fetchone()
 
@@ -55,7 +58,7 @@ def login(data: LoginRequest):
     if not user:
         raise HTTPException(status_code=401, detail="User not found")
 
-    # 🔥 DEBUG SAFE CHECK
+    # 🔥 CLEAN PASSWORD COMPARISON
     if not verify_password(data.password, user[2]):
         raise HTTPException(status_code=401, detail="Invalid credentials")
 
@@ -209,7 +212,7 @@ def debug_users():
     conn = get_connection()
     cur = conn.cursor()
 
-    cur.execute("SELECT id, username, role FROM users")
+    cur.execute("SELECT id, username, password, role FROM users")
     data = cur.fetchall()
 
     cur.close()
