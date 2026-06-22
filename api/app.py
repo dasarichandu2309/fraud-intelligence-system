@@ -55,6 +55,11 @@ class PredictRequest(BaseModel):
             }
         }
 
+class TransactionRequest(BaseModel):
+    user_id: int
+    amount: float
+    hour: int
+
 # ================= PASSWORD ================= #
 def hash_password(password: str):
     return hashlib.sha256(password.encode()).hexdigest()
@@ -98,7 +103,7 @@ def login(data: LoginRequest):
         raise HTTPException(status_code=401, detail="Invalid credentials")
 
     token = jwt.encode({
-        "sub": str(user_id),  # ✅ FIXED
+        "sub": str(user_id),   # ✅ FIX
         "username": username,
         "role": role,
         "exp": datetime.datetime.utcnow() + datetime.timedelta(hours=5)
@@ -111,6 +116,7 @@ def login(data: LoginRequest):
         "role": role
     }
 
+# ================= PREDICT ================= #
 @app.post("/predict")
 def predict(data: PredictRequest, user=Depends(get_current_user)):
 
@@ -121,47 +127,36 @@ def predict(data: PredictRequest, user=Depends(get_current_user)):
     cur = conn.cursor()
 
     try:
-        # ================= USER ================= #
         user_id = data.user_id if user["role"] == "admin" else int(user["sub"])
         amount = float(data.amount)
         hour = int(data.hour)
 
         now = datetime.datetime.now()
 
-        # ================= FEATURES ================= #
         day_of_week = now.weekday()
         is_weekend = int(day_of_week >= 5)
         is_night = int(hour < 6)
 
-        # ================= USER STATS ================= #
+        # USER STATS
         cur.execute("SELECT AVG(amount), MAX(amount) FROM history WHERE user_id=%s", (user_id,))
         stats = cur.fetchone() or (0, 0)
 
         avg_amount = stats[0] or 0
         max_amount = stats[1] or 0
 
-        # ================= TRANSACTIONS ================= #
-        cur.execute(
-            "SELECT COUNT(*) FROM history WHERE user_id=%s AND time >= NOW() - INTERVAL '1 hour'",
-            (user_id,)
-        )
+        # TRANSACTIONS
+        cur.execute("SELECT COUNT(*) FROM history WHERE user_id=%s AND time >= NOW() - INTERVAL '1 hour'", (user_id,))
         txn_1hr = cur.fetchone()[0] or 0
 
-        cur.execute(
-            "SELECT COUNT(*) FROM history WHERE user_id=%s AND time >= NOW() - INTERVAL '24 hours'",
-            (user_id,)
-        )
+        cur.execute("SELECT COUNT(*) FROM history WHERE user_id=%s AND time >= NOW() - INTERVAL '24 hours'", (user_id,))
         txn_24hr = cur.fetchone()[0] or 0
 
-        # ================= TIME GAP ================= #
-        cur.execute(
-            "SELECT EXTRACT(EPOCH FROM (NOW() - MAX(time))) FROM history WHERE user_id=%s",
-            (user_id,)
-        )
+        # TIME GAP
+        cur.execute("SELECT EXTRACT(EPOCH FROM (NOW() - MAX(time))) FROM history WHERE user_id=%s", (user_id,))
         gap = cur.fetchone()[0]
         time_gap = gap if gap else 0
 
-        # ================= INPUT DF ================= #
+        # INPUT
         input_df = pd.DataFrame([{
             "Amount": amount,
             "hour": hour,
@@ -177,33 +172,34 @@ def predict(data: PredictRequest, user=Depends(get_current_user)):
             "amount_deviation": amount - avg_amount
         }])
 
-        # ================= SAFE FEATURE ALIGN ================= #
+        # FEATURE ALIGN
         for col in features:
             if col not in input_df:
                 input_df[col] = 0
 
         input_df = input_df[features]
 
-        # ================= PREDICTION ================= #
+        # PREDICT
         fraud_pred = int(fraud_model.predict(input_df)[0])
         prob = float(fraud_model.predict_proba(input_df)[0][1])
 
         anomaly_pred = anomaly_model.predict(input_df)[0]
         is_anomaly = int(anomaly_pred == -1)
 
-        # ================= SHAP SAFE ================= #
+        # SHAP SAFE
         try:
-            model_only = fraud_model.named_steps["model"]
-
             shap_values = explainer.shap_values(input_df)
-            values = shap_values[1][0]
+
+            if isinstance(shap_values, list) and len(shap_values) > 1:
+                values = shap_values[1][0]
+            else:
+                values = shap_values[0]
 
             shap_result = sorted(
                 [{"feature": features[i], "impact": float(values[i])} for i in range(len(features))],
                 key=lambda x: abs(x["impact"]),
                 reverse=True
             )
-
         except Exception as e:
             print("SHAP ERROR:", e)
             shap_result = []
@@ -212,7 +208,7 @@ def predict(data: PredictRequest, user=Depends(get_current_user)):
         print("PREDICT ERROR:", e)
         raise HTTPException(status_code=500, detail=str(e))
 
-    # ================= RISK ================= #
+    # RISK
     if prob > 0.6:
         risk = "HIGH"
     elif prob > 0.3:
@@ -222,11 +218,11 @@ def predict(data: PredictRequest, user=Depends(get_current_user)):
     else:
         risk = "LOW"
 
-    # ================= SAVE ================= #
+    # SAVE
     try:
         cur.execute(
             "INSERT INTO history (user_id, amount, hour, fraud, risk) VALUES (%s,%s,%s,%s,%s)",
-            (user_id, amount, hour, fraud_pred, risk)
+            (user_id, amount, hour, fraud_pred, str(risk))
         )
 
         if risk == "HIGH":
@@ -257,10 +253,19 @@ def predict(data: PredictRequest, user=Depends(get_current_user)):
 def alerts(user=Depends(get_current_user)):
     conn = get_connection()
     cur = conn.cursor()
-    cur.execute("SELECT user_id, amount, risk, time FROM history ORDER BY time DESC LIMIT 20")
+
+    cur.execute("""
+        SELECT user_id, amount, risk, time
+        FROM history
+        ORDER BY time DESC
+        LIMIT 20
+    """)
+
     data = cur.fetchall()
+
     cur.close()
     conn.close()
+
     return {"alerts": data}
 
 # ================= HISTORY ================= #
@@ -268,10 +273,13 @@ def alerts(user=Depends(get_current_user)):
 def history(user_id: int, user=Depends(get_current_user)):
     conn = get_connection()
     cur = conn.cursor()
+
     cur.execute("SELECT * FROM history WHERE user_id=%s ORDER BY id DESC", (user_id,))
     data = cur.fetchall()
+
     cur.close()
     conn.close()
+
     return {"history": data}
 
 # ================= BLACKLIST ================= #
@@ -279,50 +287,47 @@ def history(user_id: int, user=Depends(get_current_user)):
 def blacklist(user_id: int, reason: str, user=Depends(get_current_user)):
     if user["role"] != "admin":
         raise HTTPException(status_code=403, detail="Admin only")
+
     conn = get_connection()
     cur = conn.cursor()
+
     cur.execute("INSERT INTO blacklist (user_id, reason) VALUES (%s,%s)", (user_id, reason))
+
     conn.commit()
     cur.close()
     conn.close()
+
     return {"message": "User blacklisted"}
 
 @app.delete("/blacklist/{user_id}")
 def remove(user_id: int, user=Depends(get_current_user)):
     if user["role"] != "admin":
         raise HTTPException(status_code=403, detail="Admin only")
+
     conn = get_connection()
     cur = conn.cursor()
+
     cur.execute("DELETE FROM blacklist WHERE user_id=%s", (user_id,))
     conn.commit()
+
     cur.close()
     conn.close()
-    return {"message": "Removed from blacklist"}
-# ================= ADD TRANSACTION ================= #
-class TransactionRequest(BaseModel):
-    user_id: int
-    amount: float
-    hour: int
 
+    return {"message": "Removed from blacklist"}
+
+# ================= ADD TRANSACTION ================= #
 @app.post("/add_transaction")
 def add_transaction(data: TransactionRequest, user=Depends(get_current_user)):
 
     conn = get_connection()
     cur = conn.cursor()
 
-    # role control
-    if user["role"] == "admin":
-        user_id = data.user_id
-    else:
-        user_id = int(user["sub"])
-
-    amount = data.amount
-    hour = data.hour
+    user_id = data.user_id if user["role"] == "admin" else int(user["sub"])
 
     try:
         cur.execute(
             "INSERT INTO history (user_id, amount, hour, fraud, risk) VALUES (%s,%s,%s,%s,%s)",
-            (user_id, amount, hour, 0, "NORMAL")
+            (user_id, data.amount, data.hour, 0, "NORMAL")
         )
 
         conn.commit()
@@ -334,23 +339,23 @@ def add_transaction(data: TransactionRequest, user=Depends(get_current_user)):
         cur.close()
         conn.close()
 
-    return {
-        "message": "Transaction added successfully",
-        "user_id": user_id,
-        "amount": amount
-    }
+    return {"message": "Transaction added"}
 
 # ================= AUDIT LOGS ================= #
 @app.get("/audit_logs")
 def audit_logs(user=Depends(get_current_user)):
     if user["role"] != "admin":
         raise HTTPException(status_code=403, detail="Admin only")
+
     conn = get_connection()
     cur = conn.cursor()
+
     cur.execute("SELECT user_id, amount, risk, time FROM history ORDER BY time DESC LIMIT 50")
     logs = cur.fetchall()
+
     cur.close()
     conn.close()
+
     return {"logs": logs}
 
 # ================= ROOT ================= #
