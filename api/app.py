@@ -167,35 +167,54 @@ def predict(data: PredictRequest, user=Depends(get_current_user)):
             "amount_deviation": amount - avg_amount
         }])
 
+        # Ensure feature match
         for col in features:
             if col not in input_df:
                 input_df[col] = 0
 
         input_df = input_df[features]
 
+        # ================= MODEL ================= #
         fraud_pred = int(fraud_model.predict(input_df)[0])
         prob = float(fraud_model.predict_proba(input_df)[0][1])
 
         anomaly_pred = anomaly_model.predict(input_df)[0]
         is_anomaly = int(anomaly_pred == -1)
 
-        # ================= SHAP ================= #
+        # ================= SHAP FIX ================= #
         try:
             shap_values = explainer.shap_values(input_df)
-            values = shap_values[1][0] if isinstance(shap_values, list) else shap_values[0]
+
+            # handle list or array
+            if isinstance(shap_values, list):
+                values = shap_values[1] if len(shap_values) > 1 else shap_values[0]
+            else:
+                values = shap_values
+
+            # convert safely
+            values = pd.DataFrame(values).values
+            values = values[0] if len(values.shape) > 1 else values
 
             shap_result = sorted(
-                [{"feature": features[i], "impact": float(values[i])} for i in range(len(features))],
+                [
+                    {
+                        "feature": features[i],
+                        "impact": float(values[i]) if i < len(values) else 0.0
+                    }
+                    for i in range(len(features))
+                ],
                 key=lambda x: abs(x["impact"]),
                 reverse=True
             )
-        except:
+
+        except Exception as e:
+            print("SHAP ERROR FIXED:", e)
             shap_result = []
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-    # ================= BANKING RISK ENGINE ================= #
+    # ================= BANKING RISK ================= #
     risk_score = 0
     reasons = []
 
@@ -234,25 +253,22 @@ def predict(data: PredictRequest, user=Depends(get_current_user)):
         risk = "LOW"
 
     # ================= SAVE ================= #
-    try:
+    cur.execute(
+        """INSERT INTO history 
+        (user_id, amount, hour, fraud, risk, device_id, location)
+        VALUES (%s,%s,%s,%s,%s,%s,%s)""",
+        (user_id, amount, hour, fraud_pred, risk, device_id, location)
+    )
+
+    if risk == "HIGH":
         cur.execute(
-            """INSERT INTO history 
-            (user_id, amount, hour, fraud, risk, device_id, location)
-            VALUES (%s,%s,%s,%s,%s,%s,%s)""",
-            (user_id, amount, hour, fraud_pred, risk, device_id, location)
+            "INSERT INTO blacklist (user_id, reason) VALUES (%s,%s)",
+            (user_id, "High risk fraud")
         )
 
-        if risk == "HIGH":
-            cur.execute(
-                "INSERT INTO blacklist (user_id, reason) VALUES (%s,%s)",
-                (user_id, "High risk fraud")
-            )
-
-        conn.commit()
-
-    finally:
-        cur.close()
-        conn.close()
+    conn.commit()
+    cur.close()
+    conn.close()
 
     return {
         "fraud": fraud_pred,
