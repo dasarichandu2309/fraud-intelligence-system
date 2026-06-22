@@ -40,9 +40,11 @@ if st.session_state.token is None:
         if r.status_code == 200:
             data = r.json()
             st.session_state.token = data["access_token"]
+
             decoded = jwt.decode(data["access_token"], "supersecretkey", algorithms=["HS256"])
             st.session_state.role = decoded["role"]
             st.session_state.user = decoded["sub"]
+
             st.success("Login success")
             st.rerun()
         else:
@@ -54,8 +56,8 @@ headers = {"Authorization": f"Bearer {st.session_state.token}"}
 
 # ================= SIDEBAR ================= #
 st.sidebar.title("⚙️ Control Panel")
-st.sidebar.write(f"User: {st.session_state.user}")
-st.sidebar.write(f"Role: {st.session_state.role}")
+st.sidebar.write(f"👤 User: {st.session_state.user}")
+st.sidebar.write(f"🔐 Role: {st.session_state.role}")
 
 menu = st.sidebar.radio(
     "Menu",
@@ -72,7 +74,7 @@ if auto:
     time.sleep(interval)
     st.rerun()
 
-# ================= RISK COLOR ================= #
+# ================= RISK FORMAT ================= #
 def risk_color(r):
     return {
         "HIGH": "🔴 HIGH",
@@ -84,22 +86,18 @@ def risk_color(r):
 # ================= DASHBOARD ================= #
 if menu == "Dashboard":
 
-    st.title("📊 Live Dashboard")
+    st.title("📊 Fraud Dashboard")
 
     r = requests.get(f"{API_URL}/alerts", headers=headers)
 
-    if r.status_code == 200:
-        data = r.json().get("alerts", [])
-    else:
-        data = []
+    data = r.json().get("alerts", []) if r.status_code == 200 else []
 
     if not data:
         r = requests.get(f"{API_URL}/history/{user_id}", headers=headers)
-        if r.status_code == 200:
-            data = r.json().get("history", [])
+        data = r.json().get("history", []) if r.status_code == 200 else []
 
     if not data:
-        st.error("No data available")
+        st.warning("No data available")
         st.stop()
 
     df = pd.DataFrame(data)
@@ -111,10 +109,11 @@ if menu == "Dashboard":
 
     # ================= KPIs ================= #
     c1,c2,c3,c4 = st.columns(4)
-    c1.metric("💰 Total", len(df))
-    c2.metric("🔴 High", (df["risk"]=="HIGH").sum())
-    c3.metric("🟠 Medium", (df["risk"]=="MEDIUM").sum())
-    c4.metric("💸 Avg Amount", round(df["amount"].mean(),2))
+
+    c1.metric("Transactions", len(df))
+    c2.metric("High Risk", (df["risk"]=="HIGH").sum())
+    c3.metric("Medium Risk", (df["risk"]=="MEDIUM").sum())
+    c4.metric("Avg Amount", round(df["amount"].mean(),2))
 
     st.divider()
 
@@ -130,25 +129,13 @@ if menu == "Dashboard":
         trend = df.groupby(df["time"].dt.hour)["amount"].count()
         st.line_chart(trend)
 
-    st.subheader("Amount vs Risk")
+    st.subheader("Amount by Risk")
     st.bar_chart(df.groupby("risk")["amount"].mean())
 
     st.divider()
 
-    # ================= TABLE ================= #
-    def highlight(row):
-        if row["risk"]=="HIGH":
-            return ["background-color: red"]*len(row)
-        elif row["risk"]=="MEDIUM":
-            return ["background-color: orange"]*len(row)
-        elif row["risk"]=="SUSPICIOUS":
-            return ["background-color: yellow"]*len(row)
-        else:
-            return ["background-color: green"]*len(row)
-
     df["risk"] = df["risk"].apply(risk_color)
-
-    st.dataframe(df.style.apply(highlight, axis=1))
+    st.dataframe(df, use_container_width=True)
 
 # ================= PREDICT ================= #
 elif menu == "Predict":
@@ -159,13 +146,21 @@ elif menu == "Predict":
     hr = st.slider("Hour",0,23)
 
     if st.button("Predict"):
+
         r = requests.post(
             f"{API_URL}/predict",
-            json={"user_id":user_id,"amount":amt,"hour":hr},
+            json={
+                "user_id":user_id,
+                "amount":amt,
+                "hour":hr,
+                "device_id":"web_app",
+                "location":"IN"
+            },
             headers=headers
         )
 
         if r.status_code == 200:
+
             res = r.json()
             prob = res["probability"]
             risk = res["risk"]
@@ -174,27 +169,18 @@ elif menu == "Predict":
             st.progress(prob)
             st.metric("Fraud Probability", f"{prob*100:.2f}%")
 
-            # SHAP
+            # ================= REASONS ================= #
+            if "reasons" in res:
+                st.subheader("🧠 Risk Reasons")
+                for reason in res["reasons"]:
+                    st.write(f"⚠️ {reason}")
+
+            # ================= SHAP ================= #
             exp = res.get("explanation",[])
             if exp:
-                st.subheader("🧠 Why?")
+                st.subheader("📊 Feature Impact")
                 for e in exp[:5]:
-                    if e["impact"] > 0:
-                        st.write(f"🔴 {e['feature']} increases risk")
-                    else:
-                        st.write(f"🟢 {e['feature']} reduces risk")
-
-            # INSIGHTS
-            st.subheader("💡 Insights")
-            if prob > 0.6:
-                st.error("High fraud → block transaction")
-            elif prob > 0.3:
-                st.warning("Suspicious → monitor")
-            else:
-                st.success("Normal transaction")
-
-        else:
-            st.error("Prediction failed")
+                    st.write(f"{e['feature']} → {round(e['impact'],3)}")
 
 # ================= ADD ================= #
 elif menu == "Add Transaction":
@@ -218,15 +204,24 @@ elif menu == "Add Transaction":
 
 # ================= ALERTS ================= #
 elif menu == "Alerts":
+
+    st.title("🚨 Alerts")
+
     r = requests.get(f"{API_URL}/alerts", headers=headers)
     if r.status_code == 200:
-        st.dataframe(pd.DataFrame(r.json()["alerts"]))
+        df = pd.DataFrame(r.json()["alerts"])
+        df["risk"] = df["risk"].apply(risk_color)
+        st.dataframe(df)
 
 # ================= HISTORY ================= #
 elif menu == "History":
+
+    st.title("📜 History")
+
     r = requests.get(f"{API_URL}/history/{user_id}", headers=headers)
     if r.status_code == 200:
-        st.dataframe(pd.DataFrame(r.json()["history"]))
+        df = pd.DataFrame(r.json()["history"])
+        st.dataframe(df)
 
 # ================= BLACKLIST ================= #
 elif menu == "Blacklist":
@@ -235,15 +230,38 @@ elif menu == "Blacklist":
         st.error("Admin only")
         st.stop()
 
+    st.title("🚫 Blacklist Management")
+
     col1,col2 = st.columns(2)
 
-    if col1.button("Add"):
-        requests.post(f"{API_URL}/blacklist",
-                      params={"user_id":user_id,"reason":"manual"},
-                      headers=headers)
+    if col1.button("➕ Add User"):
+        r = requests.post(
+            f"{API_URL}/blacklist",
+            params={"user_id":user_id,"reason":"manual"},
+            headers=headers
+        )
+        st.success("Added" if r.status_code==200 else "Failed")
 
-    if col2.button("Remove"):
-        requests.delete(f"{API_URL}/blacklist/{user_id}", headers=headers)
+    if col2.button("❌ Remove User"):
+        r = requests.delete(
+            f"{API_URL}/blacklist/{user_id}",
+            headers=headers
+        )
+        st.success("Removed" if r.status_code==200 else "Failed")
+
+    # SHOW HIGH RISK USERS
+    st.subheader("⚠️ Blacklisted Users")
+
+    r = requests.get(f"{API_URL}/audit_logs", headers=headers)
+
+    if r.status_code == 200:
+        df = pd.DataFrame(r.json()["logs"], columns=["user_id","amount","risk","time"])
+        df = df[df["risk"]=="HIGH"]
+
+        if df.empty:
+            st.info("No blacklisted users")
+        else:
+            st.dataframe(df)
 
 # ================= AUDIT ================= #
 elif menu == "Audit Logs":
@@ -252,9 +270,13 @@ elif menu == "Audit Logs":
         st.error("Admin only")
         st.stop()
 
+    st.title("📜 Audit Logs")
+
     r = requests.get(f"{API_URL}/audit_logs", headers=headers)
+
     if r.status_code == 200:
-        st.dataframe(pd.DataFrame(r.json()["logs"]))
+        df = pd.DataFrame(r.json()["logs"], columns=["user_id","amount","risk","time"])
+        st.dataframe(df)
 
 # ================= LOGOUT ================= #
 elif menu == "Logout":
