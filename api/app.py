@@ -62,11 +62,12 @@ def hash_password(password: str):
 # ================= AUTH ================= #
 def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security)):
     try:
-        token = credentials.credentials
+        token = credentials.credentials.strip()
 
-        # 🔥 FIX TOKEN ISSUE
         if token.startswith("Bearer "):
-            token = token.replace("Bearer ", "")
+            token = token[7:]
+
+        token = token.replace('"', '').replace("'", "")
 
         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
         return payload
@@ -97,7 +98,7 @@ def login(data: LoginRequest):
         raise HTTPException(status_code=401, detail="Invalid credentials")
 
     token = jwt.encode({
-        "sub": user_id,
+        "sub": str(user_id),  # ✅ FIXED
         "username": username,
         "role": role,
         "exp": datetime.datetime.utcnow() + datetime.timedelta(hours=5)
