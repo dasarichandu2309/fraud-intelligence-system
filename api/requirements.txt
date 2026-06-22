@@ -6,3 +6,4 @@ scikit-learn
 joblib
 python-jose
 psycopg2-binary
+shap
