@@ -6,7 +6,8 @@ from pydantic import BaseModel
 import datetime
 import hashlib
 import joblib
-import numpy as np
+import pandas as pd
+import shap
 
 app = FastAPI()
 
@@ -19,11 +20,13 @@ ALGORITHM = "HS256"
 try:
     fraud_model = joblib.load("fraud_model.pkl")
     anomaly_model = joblib.load("anomaly_model.pkl")
-    print("✅ Models loaded successfully")
+    explainer = shap.TreeExplainer(fraud_model)
+    print("✅ Models + SHAP loaded")
 except Exception as e:
-    print("❌ Model load failed:", e)
+    print("❌ Load failed:", e)
     fraud_model = None
     anomaly_model = None
+    explainer = None
 
 # ================= PASSWORD ================= #
 def hash_password(password: str):
@@ -48,7 +51,7 @@ def login(data: LoginRequest):
     conn = get_connection()
     cur = conn.cursor()
 
-    cur.execute("SELECT username, password, role FROM users WHERE username=%s", (data.username.strip(),))
+    cur.execute("SELECT id, username, password, role FROM users WHERE username=%s", (data.username.strip(),))
     user = cur.fetchone()
 
     cur.close()
@@ -57,26 +60,22 @@ def login(data: LoginRequest):
     if not user:
         raise HTTPException(status_code=401, detail="User not found")
 
-    username, db_password, role = user
+    user_id, username, db_password, role = user
 
-    input_hash = hashlib.sha256(data.password.encode()).hexdigest().strip()
-    db_hash = str(db_password).strip()
-
-    print("INPUT HASH:", input_hash)
-    print("DB HASH:", db_hash)
-
-    if input_hash != db_hash:
+    if hash_password(data.password) != str(db_password).strip():
         raise HTTPException(status_code=401, detail="Invalid credentials")
 
     token = jwt.encode({
-        "sub": username,
+        "sub": user_id,
+        "username": username,
         "role": role,
         "exp": datetime.datetime.utcnow() + datetime.timedelta(hours=5)
     }, SECRET_KEY, algorithm=ALGORITHM)
 
     return {
         "access_token": token,
-        "user": username,
+        "user_id": user_id,
+        "username": username,
         "role": role
     }
 
@@ -90,24 +89,52 @@ def predict(data: dict, user=Depends(get_current_user)):
     conn = get_connection()
     cur = conn.cursor()
 
-    user_id = data.get("user_id")
+    # 🔥 Allow manual user_id OR fallback to token
+    if user["role"] == "admin":
+        user_id = int(data.get("user_id", user["sub"]))
+    else:
+        user_id = int(user["sub"])
+
     amount = float(data.get("amount", 0))
     hour = int(data.get("hour", 0))
 
     try:
-        # 🔥 FIX: match model expected 6 features
-        X = np.array([[amount, hour, 0, 0, 0, 0]])
+        input_df = pd.DataFrame([{
+            "amount": amount,
+            "hour": hour,
+            "f1": 0,
+            "f2": 0,
+            "f3": 0,
+            "f4": 0
+        }])
 
-        fraud_pred = int(fraud_model.predict(X)[0])
-        prob = float(fraud_model.predict_proba(X)[0][1])
+        fraud_pred = int(fraud_model.predict(input_df)[0])
+        prob = float(fraud_model.predict_proba(input_df)[0][1])
 
-        anomaly_pred = anomaly_model.predict(X)[0]
+        anomaly_pred = anomaly_model.predict(input_df)[0]
         is_anomaly = 1 if anomaly_pred == -1 else 0
+
+        # ================= SHAP ================= #
+        shap_values = explainer.shap_values(input_df)
+
+        if isinstance(shap_values, list):
+            shap_values = shap_values[1]
+
+        feature_names = input_df.columns.tolist()
+
+        shap_result = []
+        for i in range(len(feature_names)):
+            shap_result.append({
+                "feature": feature_names[i],
+                "impact": float(shap_values[0][i])
+            })
+
+        shap_result = sorted(shap_result, key=lambda x: abs(x["impact"]), reverse=True)
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-    # ================= RISK LOGIC ================= #
+    # ================= RISK ================= #
     if prob > 0.8:
         risk = "HIGH"
     elif prob > 0.5:
@@ -137,12 +164,13 @@ def predict(data: dict, user=Depends(get_current_user)):
         "fraud": fraud_pred,
         "anomaly": is_anomaly,
         "probability": prob,
-        "risk": risk
+        "risk": risk,
+        "explanation": shap_result[:5]
     }
 
 # ================= HISTORY ================= #
 @app.get("/history/{user_id}")
-def history(user_id: str, user=Depends(get_current_user)):
+def history(user_id: int, user=Depends(get_current_user)):
 
     conn = get_connection()
     cur = conn.cursor()
@@ -179,7 +207,10 @@ def alerts(user=Depends(get_current_user)):
 
 # ================= BLACKLIST ================= #
 @app.post("/blacklist")
-def blacklist(user_id: str, reason: str, user=Depends(get_current_user)):
+def blacklist(user_id: int, reason: str, user=Depends(get_current_user)):
+
+    if user["role"] != "admin":
+        raise HTTPException(status_code=403, detail="Admin only")
 
     conn = get_connection()
     cur = conn.cursor()
@@ -193,7 +224,7 @@ def blacklist(user_id: str, reason: str, user=Depends(get_current_user)):
     return {"message": "User blacklisted"}
 
 @app.delete("/blacklist/{user_id}")
-def remove(user_id: str, user=Depends(get_current_user)):
+def remove(user_id: int, user=Depends(get_current_user)):
 
     if user["role"] != "admin":
         raise HTTPException(status_code=403, detail="Admin only")

@@ -3,6 +3,7 @@ import requests
 import pandas as pd
 from jose import jwt, JWTError
 import time
+import matplotlib.pyplot as plt
 
 API_URL = "https://fraud-api-mcgb.onrender.com"
 
@@ -75,8 +76,8 @@ except JWTError:
 
 # ================= SIDEBAR ================= #
 st.sidebar.title("Dashboard")
-st.sidebar.write(f"👤 {st.session_state.user}")
-st.sidebar.write(f"🔐 {st.session_state.role}")
+st.sidebar.write(f"👤 User ID: {st.session_state.user}")
+st.sidebar.write(f"🔐 Role: {st.session_state.role}")
 
 menu_options = ["Predict", "Alerts", "History"]
 
@@ -87,7 +88,8 @@ menu_options.append("Logout")
 
 menu = st.sidebar.selectbox("Menu", menu_options)
 
-user_id = st.sidebar.text_input("Customer User ID", "user1")
+# 🔥 Integer input (fixed)
+user_id = st.sidebar.number_input("Customer User ID", min_value=1, step=1)
 
 # ================= PREDICT ================= #
 if menu == "Predict":
@@ -101,7 +103,11 @@ if menu == "Predict":
 
         res = requests.post(
             f"{API_URL}/predict",
-            json={"user_id": user_id, "amount": amount, "hour": hour},
+            json={
+                "user_id": user_id,   # 🔥 integer
+                "amount": amount,
+                "hour": hour
+            },
             headers=headers
         )
 
@@ -122,6 +128,39 @@ if menu == "Predict":
 
             st.progress(prob)
             st.metric("Fraud Probability", f"{prob*100:.2f}%")
+
+            # ================= SHAP ================= #
+            explanation = result.get("explanation", [])
+
+            if explanation:
+                st.subheader("🧠 Why this prediction?")
+
+                explanation = sorted(explanation, key=lambda x: abs(x["impact"]), reverse=True)
+
+                features = [x["feature"] for x in explanation]
+                impacts = [x["impact"] for x in explanation]
+
+                fig, ax = plt.subplots()
+
+                colors = ["red" if x > 0 else "green" for x in impacts]
+
+                ax.barh(features, impacts, color=colors)
+                ax.set_xlabel("Impact on Prediction")
+                ax.set_title("SHAP Feature Importance")
+
+                st.pyplot(fig)
+
+                # ================= TEXT ================= #
+                st.subheader("🔍 Key Reasons")
+
+                for item in explanation[:3]:
+                    feature = item["feature"]
+                    impact = item["impact"]
+
+                    if impact > 0:
+                        st.write(f"🔴 {feature} increased fraud risk")
+                    else:
+                        st.write(f"🟢 {feature} reduced fraud risk")
 
         else:
             st.error(f"API Error: {res.status_code}")
@@ -174,7 +213,7 @@ elif menu == "Blacklist":
     st.subheader("Blacklist Control")
 
     if st.button("Add to Blacklist"):
-        res = requests.post(
+        requests.post(
             f"{API_URL}/blacklist",
             params={"user_id": user_id, "reason": "manual"},
             headers=headers
@@ -182,7 +221,7 @@ elif menu == "Blacklist":
         st.success("User blacklisted")
 
     if st.button("Remove from Blacklist"):
-        res = requests.delete(
+        requests.delete(
             f"{API_URL}/blacklist/{user_id}",
             headers=headers
         )
