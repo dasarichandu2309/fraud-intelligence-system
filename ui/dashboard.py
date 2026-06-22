@@ -2,269 +2,260 @@ import streamlit as st
 import requests
 import pandas as pd
 from jose import jwt, JWTError
-import time
 import matplotlib.pyplot as plt
+import time
+import streamlit.components.v1 as components
 
 API_URL = "https://fraud-api-mcgb.onrender.com"
 
 st.set_page_config(page_title="Fraud Intelligence System", layout="wide")
 
 # ================= SESSION ================= #
-if "token" not in st.session_state:
-    st.session_state.token = None
-if "role" not in st.session_state:
-    st.session_state.role = None
-if "user" not in st.session_state:
-    st.session_state.user = None
+for key in ["token", "role", "user"]:
+    if key not in st.session_state:
+        st.session_state[key] = None
 
-st.title("🏦 Fraud Intelligence System")
+# ================= SOUND ================= #
+def play_alert_sound():
+    components.html(
+        """
+        <audio autoplay>
+        <source src="https://www.soundjay.com/buttons/sounds/beep-07.mp3" type="audio/mpeg">
+        </audio>
+        """,
+        height=0,
+    )
+
+# ================= HEADER ================= #
+st.markdown("## 🏦 Fraud Intelligence System")
+st.caption("Real-time Fraud Detection • Explainable AI • Risk Monitoring")
 
 # ================= LOGIN ================= #
 if st.session_state.token is None:
 
-    st.subheader("🔐 Login")
+    st.subheader("🔐 Secure Login")
 
-    username = st.text_input("Username")
-    password = st.text_input("Password", type="password")
+    col1, col2 = st.columns(2)
+    username = col1.text_input("Username")
+    password = col2.text_input("Password", type="password")
 
-    if st.button("Login"):
+    if st.button("Login", use_container_width=True):
 
         if not username or not password:
             st.warning("Enter credentials")
         else:
-            try:
-                res = requests.post(
-                    f"{API_URL}/login",
-                    json={"username": username, "password": password}
+            res = requests.post(
+                f"{API_URL}/login",
+                json={"username": username, "password": password}
+            )
+
+            if res.status_code == 200:
+                data = res.json()
+                st.session_state.token = data["access_token"]
+
+                decoded = jwt.decode(
+                    st.session_state.token,
+                    "supersecretkey",
+                    algorithms=["HS256"]
                 )
 
-                if res.status_code == 200:
-                    data = res.json()
-                    st.session_state.token = data["access_token"]
+                st.session_state.role = decoded["role"]
+                st.session_state.user = decoded["sub"]
 
-                    decoded = jwt.decode(
-                        st.session_state.token,
-                        "supersecretkey",
-                        algorithms=["HS256"]
-                    )
-
-                    st.session_state.role = decoded["role"]
-                    st.session_state.user = decoded["sub"]
-
-                    st.success("Login success ✅")
-                    st.rerun()
-                else:
-                    st.error("Login failed ❌")
-
-            except Exception as e:
-                st.error(f"Error: {e}")
+                st.success("Login successful")
+                st.rerun()
+            else:
+                st.error("Invalid credentials")
 
     st.stop()
 
-# ================= TOKEN CHECK ================= #
+# ================= AUTH ================= #
 headers = {"Authorization": f"Bearer {st.session_state.token}"}
 
 try:
     jwt.decode(st.session_state.token, "supersecretkey", algorithms=["HS256"])
 except JWTError:
     st.session_state.clear()
-    st.error("Session expired. Login again.")
+    st.error("Session expired")
     st.rerun()
 
 # ================= SIDEBAR ================= #
-st.sidebar.title("Dashboard")
-st.sidebar.write(f"👤 User ID: {st.session_state.user}")
+st.sidebar.title("⚙️ Control Panel")
+st.sidebar.write(f"👤 User: {st.session_state.user}")
 st.sidebar.write(f"🔐 Role: {st.session_state.role}")
 st.sidebar.success("🟢 System Active")
 
-menu = st.sidebar.selectbox(
-    "Menu",
-    ["Dashboard", "Predict", "Alerts", "History", "Blacklist", "Logout"]
+menu = st.sidebar.radio(
+    "Navigation",
+    ["Dashboard", "Add Transaction", "Predict", "Alerts", "History", "Blacklist", "Logout"]
 )
 
-# integer input
-user_id = st.sidebar.number_input("Customer User ID", min_value=1, step=1)
+user_id = st.sidebar.number_input("Customer ID", min_value=1, step=1)
 
 # ================= DASHBOARD ================= #
 if menu == "Dashboard":
 
-    st.title("📊 Fraud Intelligence Dashboard")
+    st.subheader("📊 Live Fraud Monitoring")
+
+    auto_refresh = st.toggle("🔄 Auto Refresh (5 sec)", value=True)
+
+    if auto_refresh:
+        time.sleep(5)
+        st.rerun()
 
     res = requests.get(f"{API_URL}/alerts", headers=headers)
 
     if res.status_code != 200:
-        st.error("Failed to fetch data")
+        st.error("API Error")
         st.stop()
 
     alerts = res.json().get("alerts", [])
 
     if not alerts:
-        st.warning("No data available")
+        st.success("🟢 No fraud alerts")
         st.stop()
 
     df = pd.DataFrame(alerts, columns=["user_id", "amount", "risk", "time"])
     df["time"] = pd.to_datetime(df["time"], errors="coerce")
 
+    # 🚨 HIGH RISK ALERT
+    high_risk = df[df["risk"] == "HIGH"]
+
+    if len(high_risk) > 0:
+        st.error(f"🚨 {len(high_risk)} HIGH RISK ALERTS!")
+        play_alert_sound()
+
     # KPIs
-    col1, col2, col3, col4 = st.columns(4)
-    col1.metric("Total Alerts", len(df))
-    col2.metric("High Risk", len(df[df["risk"] == "HIGH"]))
-    col3.metric("Medium Risk", len(df[df["risk"] == "MEDIUM"]))
-    col4.metric("Avg Amount", f"{df['amount'].mean():.2f}")
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Total Alerts", len(df))
+    c2.metric("High Risk", len(high_risk))
+    c3.metric("Medium Risk", len(df[df["risk"] == "MEDIUM"]))
+    c4.metric("Avg Amount", f"{df['amount'].mean():.2f}")
 
     st.divider()
 
-    # Risk distribution
-    st.subheader("⚠️ Risk Distribution")
-    st.bar_chart(df["risk"].value_counts())
+    col1, col2 = st.columns(2)
+
+    with col1:
+        st.subheader("⚠️ Risk Distribution")
+        st.bar_chart(df["risk"].value_counts())
+
+    with col2:
+        st.subheader("📈 Hourly Trend")
+        trend = df.groupby(df["time"].dt.hour)["amount"].count()
+        st.line_chart(trend)
 
     st.divider()
 
-    # Trend
-    st.subheader("📈 Fraud Trend (Hourly)")
-    trend = df.groupby(df["time"].dt.hour)["amount"].count()
-    st.line_chart(trend)
+    # Highlight table
+    def highlight(row):
+        if row["risk"] == "HIGH":
+            return ["background-color: red"] * len(row)
+        elif row["risk"] == "MEDIUM":
+            return ["background-color: orange"] * len(row)
+        return [""] * len(row)
 
-    st.divider()
+    st.subheader("🚨 Live Alerts Feed")
+    st.dataframe(df.style.apply(highlight, axis=1), use_container_width=True)
 
-    # Top users
-    st.subheader("👤 Top Risky Users")
-    top_users = df.groupby("user_id")["amount"].count().sort_values(ascending=False).head(10)
-    st.bar_chart(top_users)
+# ================= ADD TRANSACTION ================= #
+elif menu == "Add Transaction":
 
-    st.divider()
+    st.subheader("➕ Add Transaction")
 
-    # High risk
-    st.subheader("🔴 High Risk Transactions")
-    st.dataframe(df[df["risk"] == "HIGH"])
+    col1, col2 = st.columns(2)
+    amount = col1.number_input("Amount", 0.0)
+    hour = col2.slider("Hour", 0, 23)
 
-    st.divider()
-
-    # Styled table
-    def highlight(val):
-        if val == "HIGH":
-            return "background-color: red"
-        elif val == "MEDIUM":
-            return "background-color: orange"
-        return ""
-
-    st.subheader("🚨 Live Alerts")
-    st.dataframe(df.style.applymap(highlight, subset=["risk"]))
-
-# ================= PREDICT ================= #
-elif menu == "Predict":
-
-    st.subheader("Fraud Prediction")
-
-    amount = st.number_input("Amount", 0.0)
-    hour = st.slider("Hour", 0, 23)
-
-    if st.button("Predict"):
+    if st.button("Add Transaction", use_container_width=True):
 
         res = requests.post(
-            f"{API_URL}/predict",
+            f"{API_URL}/add_transaction",
             json={"user_id": user_id, "amount": amount, "hour": hour},
             headers=headers
         )
 
         if res.status_code == 200:
-            result = res.json()
-
-            prob = result["probability"]
-            risk = result["risk"]
-            is_anomaly = result["anomaly"]
-
-            # Risk display
-            if risk == "HIGH":
-                st.error("🔴 HIGH RISK")
-            elif risk == "MEDIUM":
-                st.warning("🟠 MEDIUM RISK")
-            elif risk == "SUSPICIOUS":
-                st.info("🟡 SUSPICIOUS")
-            else:
-                st.success("🟢 SAFE")
-
-            st.progress(prob)
-            st.metric("Fraud Probability", f"{prob*100:.2f}%")
-
-            # SHAP
-            explanation = result.get("explanation", [])
-
-            if explanation:
-                st.subheader("🧠 Why this prediction?")
-
-                explanation = sorted(explanation, key=lambda x: abs(x["impact"]), reverse=True)
-
-                features = [x["feature"] for x in explanation]
-                impacts = [x["impact"] for x in explanation]
-
-                fig, ax = plt.subplots()
-                colors = ["red" if x > 0 else "green" for x in impacts]
-
-                ax.barh(features, impacts, color=colors)
-                ax.set_title("SHAP Feature Importance")
-
-                st.pyplot(fig)
-
-                st.subheader("🔍 Key Reasons")
-
-                for item in explanation[:3]:
-                    if item["impact"] > 0:
-                        st.write(f"🔴 {item['feature']} increased fraud risk")
-                    else:
-                        st.write(f"🟢 {item['feature']} reduced fraud risk")
-
-            # Business insight
-            st.subheader("🧠 Risk Insight")
-
-            if prob > 0.8:
-                st.error("Highly likely fraud. Immediate action required.")
-            elif prob > 0.5:
-                st.warning("Suspicious transaction. Monitor.")
-            elif is_anomaly:
-                st.info("Unusual behavior detected.")
-            else:
-                st.success("Normal transaction.")
-
+            st.success("Transaction added ✅")
         else:
-            st.error("API Error")
+            st.error("Failed")
+
+# ================= PREDICT ================= #
+elif menu == "Predict":
+
+    st.subheader("🧠 Fraud Prediction")
+
+    col1, col2 = st.columns(2)
+    amount = col1.number_input("Amount", 0.0)
+    hour = col2.slider("Hour", 0, 23)
+
+    if st.button("Predict", use_container_width=True):
+
+        with st.spinner("Analyzing..."):
+
+            res = requests.post(
+                f"{API_URL}/predict",
+                json={"user_id": user_id, "amount": amount, "hour": hour},
+                headers=headers
+            )
+
+        if res.status_code != 200:
+            st.error("Prediction failed")
+            st.stop()
+
+        result = res.json()
+        prob = result["probability"]
+        risk = result["risk"]
+
+        if risk == "HIGH":
+            st.error("🔴 HIGH RISK")
+        elif risk == "MEDIUM":
+            st.warning("🟠 MEDIUM RISK")
+        elif risk == "SUSPICIOUS":
+            st.info("🟡 SUSPICIOUS")
+        else:
+            st.success("🟢 SAFE")
+
+        st.progress(prob)
+        st.metric("Fraud Probability", f"{prob*100:.2f}%")
+
+        # SHAP
+        explanation = result.get("explanation", [])
+        if explanation:
+            st.subheader("📊 Explanation")
+
+            features = [x["feature"] for x in explanation]
+            impacts = [x["impact"] for x in explanation]
+
+            fig, ax = plt.subplots()
+            ax.barh(features, impacts)
+            st.pyplot(fig)
 
 # ================= ALERTS ================= #
 elif menu == "Alerts":
 
-    st.subheader("🚨 Live Alerts")
+    st.subheader("🚨 Alerts")
 
     res = requests.get(f"{API_URL}/alerts", headers=headers)
 
     if res.status_code == 200:
-        alerts = res.json().get("alerts", [])
-
-        df = pd.DataFrame(alerts, columns=["User", "Amount", "Risk", "Time"])
-
-        def highlight(val):
-            if val == "HIGH":
-                return "background-color: red"
-            elif val == "MEDIUM":
-                return "background-color: orange"
-            return ""
-
-        st.dataframe(df.style.applymap(highlight, subset=["Risk"]))
-
+        df = pd.DataFrame(res.json()["alerts"], columns=["User", "Amount", "Risk", "Time"])
+        st.dataframe(df, use_container_width=True)
     else:
-        st.error("Error fetching alerts")
+        st.error("Failed")
 
 # ================= HISTORY ================= #
 elif menu == "History":
 
-    st.subheader("Transaction History")
+    st.subheader("📜 History")
 
     res = requests.get(f"{API_URL}/history/{user_id}", headers=headers)
 
     if res.status_code == 200:
-        data = res.json().get("history", [])
-        st.dataframe(pd.DataFrame(data))
+        df = pd.DataFrame(res.json()["history"])
+        st.dataframe(df, use_container_width=True)
     else:
-        st.error("Error fetching history")
+        st.error("Error")
 
 # ================= BLACKLIST ================= #
 elif menu == "Blacklist":
@@ -273,9 +264,11 @@ elif menu == "Blacklist":
         st.error("Admin only")
         st.stop()
 
-    st.subheader("Blacklist Control")
+    st.subheader("🚫 Blacklist")
 
-    if st.button("Add"):
+    col1, col2 = st.columns(2)
+
+    if col1.button("Add User"):
         requests.post(
             f"{API_URL}/blacklist",
             params={"user_id": user_id, "reason": "manual"},
@@ -283,7 +276,7 @@ elif menu == "Blacklist":
         )
         st.success("Added")
 
-    if st.button("Remove"):
+    if col2.button("Remove User"):
         requests.delete(
             f"{API_URL}/blacklist/{user_id}",
             headers=headers

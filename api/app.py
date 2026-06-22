@@ -270,6 +270,47 @@ def remove(user_id: int, user=Depends(get_current_user)):
     cur.close()
     conn.close()
     return {"message": "Removed from blacklist"}
+# ================= ADD TRANSACTION ================= #
+class TransactionRequest(BaseModel):
+    user_id: int
+    amount: float
+    hour: int
+
+@app.post("/add_transaction")
+def add_transaction(data: TransactionRequest, user=Depends(get_current_user)):
+
+    conn = get_connection()
+    cur = conn.cursor()
+
+    # role control
+    if user["role"] == "admin":
+        user_id = data.user_id
+    else:
+        user_id = int(user["sub"])
+
+    amount = data.amount
+    hour = data.hour
+
+    try:
+        cur.execute(
+            "INSERT INTO history (user_id, amount, hour, fraud, risk) VALUES (%s,%s,%s,%s,%s)",
+            (user_id, amount, hour, 0, "NORMAL")
+        )
+
+        conn.commit()
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+    finally:
+        cur.close()
+        conn.close()
+
+    return {
+        "message": "Transaction added successfully",
+        "user_id": user_id,
+        "amount": amount
+    }
 
 # ================= AUDIT LOGS ================= #
 @app.get("/audit_logs")
