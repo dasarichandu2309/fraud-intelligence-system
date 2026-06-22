@@ -18,10 +18,12 @@ ALGORITHM = "HS256"
 
 # ================= LOAD MODELS ================= #
 try:
-    fraud_model = joblib.load("fraud_model.pkl")
+    data = joblib.load("fraud_model.pkl")
+    fraud_model = data["model"]
+    features = data["features"]
+
     anomaly_model = joblib.load("anomaly_model.pkl")
 
-    # 🔥 FIX: works with Pipeline also
     explainer = shap.Explainer(fraud_model)
 
     print("✅ Models + SHAP loaded")
@@ -93,7 +95,7 @@ def predict(data: dict, user=Depends(get_current_user)):
     conn = get_connection()
     cur = conn.cursor()
 
-    # 🔥 allow admin override
+    # ===== USER ID =====
     if user["role"] == "admin":
         user_id = int(data.get("user_id", user["sub"]))
     else:
@@ -103,42 +105,85 @@ def predict(data: dict, user=Depends(get_current_user)):
     hour = int(data.get("hour", 0))
 
     try:
-        # 🔥 input dataframe
+        now = datetime.datetime.now()
+
+        day_of_week = now.weekday()
+        is_weekend = 1 if day_of_week >= 5 else 0
+        is_night = 1 if hour < 6 else 0
+
+        # ===== USER STATS =====
+        cur.execute("""
+            SELECT AVG(amount), MAX(amount)
+            FROM history WHERE user_id=%s
+        """, (user_id,))
+        stats = cur.fetchone()
+
+        avg_amount = stats[0] or 0
+        max_amount = stats[1] or 0
+
+        # ===== TRANSACTIONS =====
+        cur.execute("""
+            SELECT COUNT(*) FROM history 
+            WHERE user_id=%s AND time >= NOW() - INTERVAL '1 hour'
+        """, (user_id,))
+        txn_1hr = cur.fetchone()[0]
+
+        cur.execute("""
+            SELECT COUNT(*) FROM history 
+            WHERE user_id=%s AND time >= NOW() - INTERVAL '24 hours'
+        """, (user_id,))
+        txn_24hr = cur.fetchone()[0]
+
+        # ===== TIME GAP =====
+        cur.execute("""
+            SELECT EXTRACT(EPOCH FROM (NOW() - MAX(time)))
+            FROM history WHERE user_id=%s
+        """, (user_id,))
+        gap = cur.fetchone()[0]
+
+        time_gap = gap if gap else 0
+
+        # ===== INPUT =====
         input_df = pd.DataFrame([{
-            "amount": amount,
+            "Amount": amount,
             "hour": hour,
-            "f1": 0,
-            "f2": 0,
-            "f3": 0,
-            "f4": 0
+            "day_of_week": day_of_week,
+            "is_weekend": is_weekend,
+            "transactions_last_1hr": txn_1hr,
+            "transactions_last_24hr": txn_24hr,
+            "avg_user_amount": avg_amount,
+            "max_user_amount": max_amount,
+            "time_since_last_txn": time_gap,
+            "is_night": is_night,
+            "high_amount_flag": int(amount > avg_amount),
+            "amount_deviation": amount - avg_amount
         }])
 
-        # 🔥 prediction (pipeline handles scaling)
+        # 🔥 match model features
+        input_df = input_df[features]
+
+        # ===== PREDICTIONS =====
         fraud_pred = int(fraud_model.predict(input_df)[0])
         prob = float(fraud_model.predict_proba(input_df)[0][1])
 
         anomaly_pred = anomaly_model.predict(input_df)[0]
         is_anomaly = 1 if anomaly_pred == -1 else 0
 
-        # ================= SHAP ================= #
+        # ===== SHAP =====
         shap_values = explainer(input_df)
-
         values = shap_values.values[0]
-        feature_names = input_df.columns.tolist()
 
-        shap_result = []
-        for i in range(len(feature_names)):
-            shap_result.append({
-                "feature": feature_names[i],
-                "impact": float(values[i])
-            })
+        shap_result = [
+            {"feature": features[i], "impact": float(values[i])}
+            for i in range(len(features))
+        ]
 
         shap_result = sorted(shap_result, key=lambda x: abs(x["impact"]), reverse=True)
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-    # ================= RISK ================= #
+    # ===== RISK =====
     if prob > 0.8:
         risk = "HIGH"
     elif prob > 0.5:
@@ -148,7 +193,7 @@ def predict(data: dict, user=Depends(get_current_user)):
     else:
         risk = "LOW"
 
-    # ================= SAVE ================= #
+    # ===== SAVE =====
     cur.execute(
         "INSERT INTO history (user_id, amount, hour, fraud, risk) VALUES (%s,%s,%s,%s,%s)",
         (user_id, amount, hour, fraud_pred, risk)
@@ -171,78 +216,6 @@ def predict(data: dict, user=Depends(get_current_user)):
         "risk": risk,
         "explanation": shap_result[:5]
     }
-
-# ================= HISTORY ================= #
-@app.get("/history/{user_id}")
-def history(user_id: int, user=Depends(get_current_user)):
-
-    conn = get_connection()
-    cur = conn.cursor()
-
-    cur.execute("SELECT * FROM history WHERE user_id=%s ORDER BY id DESC", (user_id,))
-    data = cur.fetchall()
-
-    cur.close()
-    conn.close()
-
-    return {"history": data}
-
-# ================= ALERTS ================= #
-@app.get("/alerts")
-def alerts(user=Depends(get_current_user)):
-
-    conn = get_connection()
-    cur = conn.cursor()
-
-    cur.execute("""
-        SELECT user_id, amount, risk, time
-        FROM history
-        WHERE risk IN ('HIGH','MEDIUM')
-        ORDER BY time DESC
-        LIMIT 10
-    """)
-
-    data = cur.fetchall()
-
-    cur.close()
-    conn.close()
-
-    return {"alerts": data}
-
-# ================= BLACKLIST ================= #
-@app.post("/blacklist")
-def blacklist(user_id: int, reason: str, user=Depends(get_current_user)):
-
-    if user["role"] != "admin":
-        raise HTTPException(status_code=403, detail="Admin only")
-
-    conn = get_connection()
-    cur = conn.cursor()
-
-    cur.execute("INSERT INTO blacklist (user_id, reason) VALUES (%s,%s)", (user_id, reason))
-
-    conn.commit()
-    cur.close()
-    conn.close()
-
-    return {"message": "User blacklisted"}
-
-@app.delete("/blacklist/{user_id}")
-def remove(user_id: int, user=Depends(get_current_user)):
-
-    if user["role"] != "admin":
-        raise HTTPException(status_code=403, detail="Admin only")
-
-    conn = get_connection()
-    cur = conn.cursor()
-
-    cur.execute("DELETE FROM blacklist WHERE user_id=%s", (user_id,))
-    conn.commit()
-
-    cur.close()
-    conn.close()
-
-    return {"message": "Removed from blacklist"}
 
 # ================= ROOT ================= #
 @app.get("/")
