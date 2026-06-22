@@ -24,7 +24,11 @@ try:
 
     anomaly_model = joblib.load("anomaly_model.pkl")
 
-    explainer = shap.Explainer(fraud_model)
+    # 🔥 FIX: extract model from pipeline
+    model_only = fraud_model.named_steps["model"]
+
+    # 🔥 FIX: proper SHAP for tree models
+    explainer = shap.TreeExplainer(model_only)
 
     print("✅ Models + SHAP loaded")
 
@@ -159,7 +163,6 @@ def predict(data: dict, user=Depends(get_current_user)):
             "amount_deviation": amount - avg_amount
         }])
 
-        # 🔥 match model features
         input_df = input_df[features]
 
         # ===== PREDICTIONS =====
@@ -169,9 +172,12 @@ def predict(data: dict, user=Depends(get_current_user)):
         anomaly_pred = anomaly_model.predict(input_df)[0]
         is_anomaly = 1 if anomaly_pred == -1 else 0
 
-        # ===== SHAP =====
-        shap_values = explainer(input_df)
-        values = shap_values.values[0]
+        # ===== SHAP FIX =====
+        scaled_input = fraud_model.named_steps["scaler"].transform(input_df)
+
+        shap_values = explainer.shap_values(scaled_input)
+
+        values = shap_values[1][0]  # class 1
 
         shap_result = [
             {"feature": features[i], "impact": float(values[i])}
