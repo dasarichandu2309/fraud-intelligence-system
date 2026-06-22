@@ -24,7 +24,6 @@ try:
 
     anomaly_model = joblib.load("anomaly_model.pkl")
 
-    # SHAP FIX (pipeline → extract model)
     model_only = fraud_model.named_steps["model"]
     explainer = shap.TreeExplainer(model_only)
 
@@ -35,6 +34,25 @@ except Exception as e:
     fraud_model = None
     anomaly_model = None
     explainer = None
+
+# ================= SCHEMAS ================= #
+class LoginRequest(BaseModel):
+    username: str
+    password: str
+
+class PredictRequest(BaseModel):
+    user_id: int
+    amount: float
+    hour: int
+
+    class Config:
+        schema_extra = {
+            "example": {
+                "user_id": 1,
+                "amount": 5000,
+                "hour": 14
+            }
+        }
 
 # ================= PASSWORD ================= #
 def hash_password(password: str):
@@ -49,10 +67,6 @@ def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(securit
         raise HTTPException(status_code=401, detail="Invalid token")
 
 # ================= LOGIN ================= #
-class LoginRequest(BaseModel):
-    username: str
-    password: str
-
 @app.post("/login")
 def login(data: LoginRequest):
 
@@ -89,7 +103,7 @@ def login(data: LoginRequest):
 
 # ================= PREDICT ================= #
 @app.post("/predict")
-def predict(data: dict, user=Depends(get_current_user)):
+def predict(data: PredictRequest, user=Depends(get_current_user)):
 
     if fraud_model is None:
         raise HTTPException(status_code=500, detail="Model not loaded")
@@ -98,13 +112,9 @@ def predict(data: dict, user=Depends(get_current_user)):
     cur = conn.cursor()
 
     # USER ID
-    if user["role"] == "admin":
-        user_id = int(data.get("user_id", user["sub"]))
-    else:
-        user_id = int(user["sub"])
-
-    amount = float(data.get("amount", 0))
-    hour = int(data.get("hour", 0))
+    user_id = data.user_id if user["role"] == "admin" else int(user["sub"])
+    amount = data.amount
+    hour = data.hour
 
     try:
         now = datetime.datetime.now()
@@ -207,103 +217,27 @@ def predict(data: dict, user=Depends(get_current_user)):
         "explanation": shap_result[:5]
     }
 
-# ================= ALERTS ================= #
+# ================= OTHER ENDPOINTS ================= #
 @app.get("/alerts")
 def alerts(user=Depends(get_current_user)):
-
     conn = get_connection()
     cur = conn.cursor()
-
-    cur.execute("""
-        SELECT user_id, amount, risk, time
-        FROM history
-        WHERE risk IN ('HIGH','MEDIUM')
-        ORDER BY time DESC
-        LIMIT 10
-    """)
-
+    cur.execute("SELECT user_id, amount, risk, time FROM history WHERE risk IN ('HIGH','MEDIUM') ORDER BY time DESC LIMIT 10")
     data = cur.fetchall()
-
     cur.close()
     conn.close()
-
     return {"alerts": data}
 
-# ================= HISTORY ================= #
 @app.get("/history/{user_id}")
 def history(user_id: int, user=Depends(get_current_user)):
-
     conn = get_connection()
     cur = conn.cursor()
-
     cur.execute("SELECT * FROM history WHERE user_id=%s ORDER BY id DESC", (user_id,))
     data = cur.fetchall()
-
     cur.close()
     conn.close()
-
     return {"history": data}
 
-# ================= BLACKLIST ================= #
-@app.post("/blacklist")
-def blacklist(user_id: int, reason: str, user=Depends(get_current_user)):
-
-    if user["role"] != "admin":
-        raise HTTPException(status_code=403, detail="Admin only")
-
-    conn = get_connection()
-    cur = conn.cursor()
-
-    cur.execute("INSERT INTO blacklist (user_id, reason) VALUES (%s,%s)", (user_id, reason))
-
-    conn.commit()
-    cur.close()
-    conn.close()
-
-    return {"message": "User blacklisted"}
-
-@app.delete("/blacklist/{user_id}")
-def remove(user_id: int, user=Depends(get_current_user)):
-
-    if user["role"] != "admin":
-        raise HTTPException(status_code=403, detail="Admin only")
-
-    conn = get_connection()
-    cur = conn.cursor()
-
-    cur.execute("DELETE FROM blacklist WHERE user_id=%s", (user_id,))
-    conn.commit()
-
-    cur.close()
-    conn.close()
-
-    return {"message": "Removed from blacklist"}
-
-# ================= AUDIT LOGS ================= #
-@app.get("/audit_logs")
-def audit_logs(user=Depends(get_current_user)):
-
-    if user["role"] != "admin":
-        raise HTTPException(status_code=403, detail="Admin only")
-
-    conn = get_connection()
-    cur = conn.cursor()
-
-    cur.execute("""
-        SELECT user_id, amount, risk, time
-        FROM history
-        ORDER BY time DESC
-        LIMIT 50
-    """)
-
-    logs = cur.fetchall()
-
-    cur.close()
-    conn.close()
-
-    return {"logs": logs}
-
-# ================= ROOT ================= #
 @app.get("/")
 def home():
     return {"message": "Fraud Detection API running 🚀"}
