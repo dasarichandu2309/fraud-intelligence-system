@@ -20,8 +20,12 @@ ALGORITHM = "HS256"
 try:
     fraud_model = joblib.load("fraud_model.pkl")
     anomaly_model = joblib.load("anomaly_model.pkl")
-    explainer = shap.TreeExplainer(fraud_model)
+
+    # 🔥 FIX: works with Pipeline also
+    explainer = shap.Explainer(fraud_model)
+
     print("✅ Models + SHAP loaded")
+
 except Exception as e:
     print("❌ Load failed:", e)
     fraud_model = None
@@ -89,7 +93,7 @@ def predict(data: dict, user=Depends(get_current_user)):
     conn = get_connection()
     cur = conn.cursor()
 
-    # 🔥 Allow manual user_id OR fallback to token
+    # 🔥 allow admin override
     if user["role"] == "admin":
         user_id = int(data.get("user_id", user["sub"]))
     else:
@@ -99,6 +103,7 @@ def predict(data: dict, user=Depends(get_current_user)):
     hour = int(data.get("hour", 0))
 
     try:
+        # 🔥 input dataframe
         input_df = pd.DataFrame([{
             "amount": amount,
             "hour": hour,
@@ -108,6 +113,7 @@ def predict(data: dict, user=Depends(get_current_user)):
             "f4": 0
         }])
 
+        # 🔥 prediction (pipeline handles scaling)
         fraud_pred = int(fraud_model.predict(input_df)[0])
         prob = float(fraud_model.predict_proba(input_df)[0][1])
 
@@ -115,18 +121,16 @@ def predict(data: dict, user=Depends(get_current_user)):
         is_anomaly = 1 if anomaly_pred == -1 else 0
 
         # ================= SHAP ================= #
-        shap_values = explainer.shap_values(input_df)
+        shap_values = explainer(input_df)
 
-        if isinstance(shap_values, list):
-            shap_values = shap_values[1]
-
+        values = shap_values.values[0]
         feature_names = input_df.columns.tolist()
 
         shap_result = []
         for i in range(len(feature_names)):
             shap_result.append({
                 "feature": feature_names[i],
-                "impact": float(shap_values[0][i])
+                "impact": float(values[i])
             })
 
         shap_result = sorted(shap_result, key=lambda x: abs(x["impact"]), reverse=True)
