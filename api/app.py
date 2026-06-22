@@ -213,9 +213,9 @@ def predict(data: PredictRequest, user=Depends(get_current_user)):
         raise HTTPException(status_code=500, detail=str(e))
 
     # ================= RISK ================= #
-    if prob > 0.8:
+    if prob > 0.6:
         risk = "HIGH"
-    elif prob > 0.5:
+    elif prob > 0.3:
         risk = "MEDIUM"
     elif is_anomaly:
         risk = "SUSPICIOUS"
@@ -257,7 +257,7 @@ def predict(data: PredictRequest, user=Depends(get_current_user)):
 def alerts(user=Depends(get_current_user)):
     conn = get_connection()
     cur = conn.cursor()
-    cur.execute("SELECT user_id, amount, risk, time FROM history WHERE risk IN ('HIGH','MEDIUM') ORDER BY time DESC LIMIT 10")
+    cur.execute("SELECT user_id, amount, risk, time FROM history ORDER BY time DESC LIMIT 20")
     data = cur.fetchall()
     cur.close()
     conn.close()

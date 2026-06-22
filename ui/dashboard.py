@@ -1,48 +1,24 @@
 import streamlit as st
 import requests
 import pandas as pd
-from jose import jwt, JWTError
-import matplotlib.pyplot as plt
+from jose import jwt
 import time
-import streamlit.components.v1 as components
 
 API_URL = "https://fraud-api-mcgb.onrender.com"
 
 st.set_page_config(page_title="Fraud Intelligence System", layout="wide")
 
-# ================= GLASS UI ================= #
+# ================= UI STYLE ================= #
 st.markdown("""
 <style>
 .stApp {
     background: linear-gradient(135deg, #0f172a, #1e293b);
     color: white;
 }
-
-.glass {
-    background: rgba(255,255,255,0.07);
-    backdrop-filter: blur(12px);
-    border-radius: 15px;
-    padding: 20px;
-    border: 1px solid rgba(255,255,255,0.1);
-}
-
-.kpi {
-    font-size: 26px;
-    font-weight: bold;
-}
-.kpi-title {
-    font-size: 14px;
-    color: #94a3b8;
-}
-
 .stButton>button {
     border-radius: 10px;
-    background: linear-gradient(135deg, #6366f1, #22c55e);
+    background: linear-gradient(135deg,#6366f1,#22c55e);
     color: white;
-}
-
-section[data-testid="stSidebar"] {
-    background: rgba(0,0,0,0.5);
 }
 </style>
 """, unsafe_allow_html=True)
@@ -52,31 +28,19 @@ for k in ["token","role","user"]:
     if k not in st.session_state:
         st.session_state[k] = None
 
-# ================= SOUND ================= #
-def play_alert():
-    components.html("""
-    <audio autoplay>
-    <source src="https://www.soundjay.com/buttons/sounds/beep-07.mp3">
-    </audio>
-    """, height=0)
-
-# ================= HEADER ================= #
-st.title("🏦 Fraud Intelligence System")
-st.caption("Real-time Fraud Detection • Enterprise Dashboard")
-
 # ================= LOGIN ================= #
 if st.session_state.token is None:
+    st.title("🔐 Login")
 
-    st.subheader("🔐 Login")
     u = st.text_input("Username")
     p = st.text_input("Password", type="password")
 
     if st.button("Login"):
         r = requests.post(f"{API_URL}/login", json={"username":u,"password":p})
-        if r.status_code==200:
+        if r.status_code == 200:
             data = r.json()
             st.session_state.token = data["access_token"]
-            decoded = jwt.decode(st.session_state.token,"supersecretkey",algorithms=["HS256"])
+            decoded = jwt.decode(data["access_token"], "supersecretkey", algorithms=["HS256"])
             st.session_state.role = decoded["role"]
             st.session_state.user = decoded["sub"]
             st.success("Login success")
@@ -86,147 +50,213 @@ if st.session_state.token is None:
 
     st.stop()
 
-# ================= AUTH ================= #
 headers = {"Authorization": f"Bearer {st.session_state.token}"}
 
 # ================= SIDEBAR ================= #
 st.sidebar.title("⚙️ Control Panel")
-st.sidebar.write(f"👤 User: {st.session_state.user}")
-st.sidebar.write(f"🔐 Role: {st.session_state.role}")
+st.sidebar.write(f"User: {st.session_state.user}")
+st.sidebar.write(f"Role: {st.session_state.role}")
 
-menu = st.sidebar.radio("Menu",
-    ["Dashboard","Predict","Add Transaction","Alerts","History","Logout"])
+menu = st.sidebar.radio(
+    "Menu",
+    ["Dashboard","Predict","Add Transaction","Alerts","History","Blacklist","Audit Logs","Logout"]
+)
 
 user_id = st.sidebar.number_input("User ID", min_value=1, step=1)
 
 # ================= AUTO REFRESH ================= #
-st.sidebar.markdown("### 🔄 Auto Refresh")
-auto = st.sidebar.toggle("Enable", True)
-interval = st.sidebar.selectbox("Interval (sec)", [10,30,60,120], index=1)
+auto = st.sidebar.toggle("Auto Refresh", True)
+interval = st.sidebar.selectbox("Interval (sec)", [10,30,60], index=1)
 
 if auto:
-    st.sidebar.info(f"{interval}s refresh")
     time.sleep(interval)
     st.rerun()
 
-# ================= RISK BADGE ================= #
-def badge(r):
-    c = {"HIGH":"#ef4444","MEDIUM":"#f59e0b","SUSPICIOUS":"#eab308","LOW":"#22c55e"}
-    return f"<span style='padding:6px 12px;border-radius:10px;background:{c.get(r)}'>{r}</span>"
+# ================= RISK COLOR ================= #
+def risk_color(r):
+    return {
+        "HIGH": "🔴 HIGH",
+        "MEDIUM": "🟠 MEDIUM",
+        "SUSPICIOUS": "🟡 SUSPICIOUS",
+        "LOW": "🟢 LOW"
+    }.get(r, r)
 
 # ================= DASHBOARD ================= #
-if menu=="Dashboard":
+if menu == "Dashboard":
+
+    st.title("📊 Live Dashboard")
 
     r = requests.get(f"{API_URL}/alerts", headers=headers)
 
-    if r.status_code!=200:
-        st.error("API error")
-        st.stop()
-
-    data = r.json().get("alerts",[])
+    if r.status_code == 200:
+        data = r.json().get("alerts", [])
+    else:
+        data = []
 
     if not data:
-        st.warning("No alerts yet")
+        r = requests.get(f"{API_URL}/history/{user_id}", headers=headers)
+        if r.status_code == 200:
+            data = r.json().get("history", [])
+
+    if not data:
+        st.error("No data available")
         st.stop()
 
-    df = pd.DataFrame(data, columns=["user","amount","risk","time"])
+    df = pd.DataFrame(data)
 
-    # ALERT SOUND
-    if len(df[df["risk"]=="HIGH"])>0:
-        play_alert()
+    if "user_id" not in df.columns:
+        df.columns = ["user_id","amount","risk","time"]
 
-    # KPI
+    df["time"] = pd.to_datetime(df["time"], errors="coerce")
+
+    # ================= KPIs ================= #
     c1,c2,c3,c4 = st.columns(4)
-
-    def kpi(title,val):
-        st.markdown(f"<div class='glass'><div class='kpi-title'>{title}</div><div class='kpi'>{val}</div></div>",unsafe_allow_html=True)
-
-    with c1: kpi("Total",len(df))
-    with c2: kpi("High",len(df[df["risk"]=="HIGH"]))
-    with c3: kpi("Medium",len(df[df["risk"]=="MEDIUM"]))
-    with c4: kpi("Avg",round(df["amount"].mean(),2))
+    c1.metric("💰 Total", len(df))
+    c2.metric("🔴 High", (df["risk"]=="HIGH").sum())
+    c3.metric("🟠 Medium", (df["risk"]=="MEDIUM").sum())
+    c4.metric("💸 Avg Amount", round(df["amount"].mean(),2))
 
     st.divider()
 
+    # ================= CHARTS ================= #
     col1,col2 = st.columns(2)
 
     with col1:
-        st.markdown("<div class='glass'>",unsafe_allow_html=True)
         st.subheader("Risk Distribution")
         st.bar_chart(df["risk"].value_counts())
-        st.markdown("</div>",unsafe_allow_html=True)
 
     with col2:
-        st.markdown("<div class='glass'>",unsafe_allow_html=True)
-        df["time"] = pd.to_datetime(df["time"],errors="coerce")
+        st.subheader("Hourly Trend")
         trend = df.groupby(df["time"].dt.hour)["amount"].count()
         st.line_chart(trend)
-        st.markdown("</div>",unsafe_allow_html=True)
 
-    st.markdown("<div class='glass'>",unsafe_allow_html=True)
-    st.subheader("🚨 Live Alerts")
-    st.dataframe(df, use_container_width=True)
-    st.markdown("</div>",unsafe_allow_html=True)
+    st.subheader("Amount vs Risk")
+    st.bar_chart(df.groupby("risk")["amount"].mean())
+
+    st.divider()
+
+    # ================= TABLE ================= #
+    def highlight(row):
+        if row["risk"]=="HIGH":
+            return ["background-color: red"]*len(row)
+        elif row["risk"]=="MEDIUM":
+            return ["background-color: orange"]*len(row)
+        elif row["risk"]=="SUSPICIOUS":
+            return ["background-color: yellow"]*len(row)
+        else:
+            return ["background-color: green"]*len(row)
+
+    df["risk"] = df["risk"].apply(risk_color)
+
+    st.dataframe(df.style.apply(highlight, axis=1))
 
 # ================= PREDICT ================= #
-elif menu=="Predict":
+elif menu == "Predict":
 
-    st.markdown("<div class='glass'>",unsafe_allow_html=True)
+    st.title("🔮 Fraud Prediction")
 
     amt = st.number_input("Amount",0.0)
     hr = st.slider("Hour",0,23)
 
     if st.button("Predict"):
-        r = requests.post(f"{API_URL}/predict",
+        r = requests.post(
+            f"{API_URL}/predict",
             json={"user_id":user_id,"amount":amt,"hour":hr},
-            headers=headers)
+            headers=headers
+        )
 
-        if r.status_code==200:
+        if r.status_code == 200:
             res = r.json()
-            prob = max(res["probability"],0.01)
+            prob = res["probability"]
             risk = res["risk"]
 
-            st.markdown(badge(risk),unsafe_allow_html=True)
+            st.success(risk_color(risk))
             st.progress(prob)
-            st.metric("Probability",f"{prob*100:.2f}%")
+            st.metric("Fraud Probability", f"{prob*100:.2f}%")
 
+            # SHAP
             exp = res.get("explanation",[])
             if exp:
-                st.subheader("Why?")
-                for e in exp[:3]:
-                    st.write(f"{e['feature']} → {round(e['impact'],3)}")
+                st.subheader("🧠 Why?")
+                for e in exp[:5]:
+                    if e["impact"] > 0:
+                        st.write(f"🔴 {e['feature']} increases risk")
+                    else:
+                        st.write(f"🟢 {e['feature']} reduces risk")
 
-    st.markdown("</div>",unsafe_allow_html=True)
+            # INSIGHTS
+            st.subheader("💡 Insights")
+            if prob > 0.6:
+                st.error("High fraud → block transaction")
+            elif prob > 0.3:
+                st.warning("Suspicious → monitor")
+            else:
+                st.success("Normal transaction")
+
+        else:
+            st.error("Prediction failed")
 
 # ================= ADD ================= #
-elif menu=="Add Transaction":
+elif menu == "Add Transaction":
+
+    st.title("➕ Add Transaction")
 
     amt = st.number_input("Amount",0.0)
     hr = st.slider("Hour",0,23)
 
     if st.button("Add"):
-        requests.post(f"{API_URL}/add_transaction",
+        r = requests.post(
+            f"{API_URL}/add_transaction",
             json={"user_id":user_id,"amount":amt,"hour":hr},
-            headers=headers)
-        st.success("Added")
+            headers=headers
+        )
+
+        if r.status_code == 200:
+            st.success("Transaction Added")
+        else:
+            st.error("Failed")
 
 # ================= ALERTS ================= #
-elif menu=="Alerts":
-
+elif menu == "Alerts":
     r = requests.get(f"{API_URL}/alerts", headers=headers)
-    if r.status_code==200:
-        df = pd.DataFrame(r.json()["alerts"])
-        st.dataframe(df)
+    if r.status_code == 200:
+        st.dataframe(pd.DataFrame(r.json()["alerts"]))
 
 # ================= HISTORY ================= #
-elif menu=="History":
-
+elif menu == "History":
     r = requests.get(f"{API_URL}/history/{user_id}", headers=headers)
-    if r.status_code==200:
-        df = pd.DataFrame(r.json()["history"])
-        st.dataframe(df)
+    if r.status_code == 200:
+        st.dataframe(pd.DataFrame(r.json()["history"]))
+
+# ================= BLACKLIST ================= #
+elif menu == "Blacklist":
+
+    if st.session_state.role != "admin":
+        st.error("Admin only")
+        st.stop()
+
+    col1,col2 = st.columns(2)
+
+    if col1.button("Add"):
+        requests.post(f"{API_URL}/blacklist",
+                      params={"user_id":user_id,"reason":"manual"},
+                      headers=headers)
+
+    if col2.button("Remove"):
+        requests.delete(f"{API_URL}/blacklist/{user_id}", headers=headers)
+
+# ================= AUDIT ================= #
+elif menu == "Audit Logs":
+
+    if st.session_state.role != "admin":
+        st.error("Admin only")
+        st.stop()
+
+    r = requests.get(f"{API_URL}/audit_logs", headers=headers)
+    if r.status_code == 200:
+        st.dataframe(pd.DataFrame(r.json()["logs"]))
 
 # ================= LOGOUT ================= #
-elif menu=="Logout":
+elif menu == "Logout":
     st.session_state.clear()
     st.rerun()
