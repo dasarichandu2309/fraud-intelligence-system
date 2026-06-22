@@ -83,13 +83,31 @@ def risk_color(r):
         "LOW": "🟢 LOW"
     }.get(r, r)
 
+# ================= SAFE DF FUNCTION ================= #
+def safe_df(data):
+    df = pd.DataFrame(data)
+
+    # tuple case
+    if list(df.columns) == list(range(len(df.columns))):
+        df.columns = ["user_id","amount","risk","time"]
+
+    # dict but wrong keys
+    if "risk" not in df.columns and len(df.columns) >= 4:
+        df.columns = ["user_id","amount","risk","time"]
+
+    if "risk" not in df.columns:
+        st.error("Risk column missing")
+        st.write(df)
+        st.stop()
+
+    return df
+
 # ================= DASHBOARD ================= #
 if menu == "Dashboard":
 
     st.title("📊 Fraud Dashboard")
 
     r = requests.get(f"{API_URL}/alerts", headers=headers)
-
     data = r.json().get("alerts", []) if r.status_code == 200 else []
 
     if not data:
@@ -100,16 +118,12 @@ if menu == "Dashboard":
         st.warning("No data available")
         st.stop()
 
-    df = pd.DataFrame(data)
-
-    if "user_id" not in df.columns:
-        df.columns = ["user_id","amount","risk","time"]
+    df = safe_df(data)
 
     df["time"] = pd.to_datetime(df["time"], errors="coerce")
 
-    # ================= KPIs ================= #
+    # KPIs
     c1,c2,c3,c4 = st.columns(4)
-
     c1.metric("Transactions", len(df))
     c2.metric("High Risk", (df["risk"]=="HIGH").sum())
     c3.metric("Medium Risk", (df["risk"]=="MEDIUM").sum())
@@ -117,7 +131,6 @@ if menu == "Dashboard":
 
     st.divider()
 
-    # ================= CHARTS ================= #
     col1,col2 = st.columns(2)
 
     with col1:
@@ -169,13 +182,11 @@ elif menu == "Predict":
             st.progress(prob)
             st.metric("Fraud Probability", f"{prob*100:.2f}%")
 
-            # ================= REASONS ================= #
             if "reasons" in res:
                 st.subheader("🧠 Risk Reasons")
                 for reason in res["reasons"]:
                     st.write(f"⚠️ {reason}")
 
-            # ================= SHAP ================= #
             exp = res.get("explanation",[])
             if exp:
                 st.subheader("📊 Feature Impact")
@@ -209,7 +220,7 @@ elif menu == "Alerts":
 
     r = requests.get(f"{API_URL}/alerts", headers=headers)
     if r.status_code == 200:
-        df = pd.DataFrame(r.json()["alerts"])
+        df = safe_df(r.json()["alerts"])
         df["risk"] = df["risk"].apply(risk_color)
         st.dataframe(df)
 
@@ -220,7 +231,7 @@ elif menu == "History":
 
     r = requests.get(f"{API_URL}/history/{user_id}", headers=headers)
     if r.status_code == 200:
-        df = pd.DataFrame(r.json()["history"])
+        df = safe_df(r.json()["history"])
         st.dataframe(df)
 
 # ================= BLACKLIST ================= #
@@ -249,19 +260,23 @@ elif menu == "Blacklist":
         )
         st.success("Removed" if r.status_code==200 else "Failed")
 
-    # SHOW HIGH RISK USERS
+    # SHOW BLACKLIST TABLE
     st.subheader("⚠️ Blacklisted Users")
 
     r = requests.get(f"{API_URL}/audit_logs", headers=headers)
 
     if r.status_code == 200:
-        df = pd.DataFrame(r.json()["logs"], columns=["user_id","amount","risk","time"])
-        df = df[df["risk"]=="HIGH"]
+        data = r.json()["logs"]
 
-        if df.empty:
-            st.info("No blacklisted users")
-        else:
-            st.dataframe(df)
+    df = pd.DataFrame(data, columns=["user_id","amount","risk","time"])
+
+    # 🔥 Get unique HIGH risk users (simulate blacklist view)
+    blacklisted = df[df["risk"] == "HIGH"]["user_id"].unique()
+
+    if len(blacklisted) == 0:
+        st.info("No blacklisted users")
+    else:
+        st.dataframe(pd.DataFrame({"blacklisted_user_id": blacklisted}))
 
 # ================= AUDIT ================= #
 elif menu == "Audit Logs":
@@ -275,7 +290,7 @@ elif menu == "Audit Logs":
     r = requests.get(f"{API_URL}/audit_logs", headers=headers)
 
     if r.status_code == 200:
-        df = pd.DataFrame(r.json()["logs"], columns=["user_id","amount","risk","time"])
+        df = safe_df(r.json()["logs"])
         st.dataframe(df)
 
 # ================= LOGOUT ================= #

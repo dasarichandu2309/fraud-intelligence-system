@@ -339,6 +339,17 @@ def remove(user_id: int, user=Depends(get_current_user)):
     cur.close(); conn.close()
     return {"message": "Removed from blacklist"}
 
+@app.get("/blacklist")
+def get_blacklist(credentials: HTTPAuthorizationCredentials = Depends(security)):
+    conn = get_connection()
+    cur = conn.cursor()
+
+    cur.execute("SELECT user_id, reason FROM blacklist")
+    rows = cur.fetchall()
+
+    return {"blacklist": rows}
+
+
 @app.get("/audit_logs")
 def audit_logs(user=Depends(get_current_user)):
     if user["role"] != "admin":
