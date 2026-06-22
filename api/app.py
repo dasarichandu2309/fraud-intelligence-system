@@ -24,10 +24,8 @@ try:
 
     anomaly_model = joblib.load("anomaly_model.pkl")
 
-    # 🔥 FIX: extract model from pipeline
+    # SHAP FIX (pipeline → extract model)
     model_only = fraud_model.named_steps["model"]
-
-    # 🔥 FIX: proper SHAP for tree models
     explainer = shap.TreeExplainer(model_only)
 
     print("✅ Models + SHAP loaded")
@@ -99,7 +97,7 @@ def predict(data: dict, user=Depends(get_current_user)):
     conn = get_connection()
     cur = conn.cursor()
 
-    # ===== USER ID =====
+    # USER ID
     if user["role"] == "admin":
         user_id = int(data.get("user_id", user["sub"]))
     else:
@@ -115,39 +113,27 @@ def predict(data: dict, user=Depends(get_current_user)):
         is_weekend = 1 if day_of_week >= 5 else 0
         is_night = 1 if hour < 6 else 0
 
-        # ===== USER STATS =====
-        cur.execute("""
-            SELECT AVG(amount), MAX(amount)
-            FROM history WHERE user_id=%s
-        """, (user_id,))
+        # USER STATS
+        cur.execute("SELECT AVG(amount), MAX(amount) FROM history WHERE user_id=%s", (user_id,))
         stats = cur.fetchone()
 
         avg_amount = stats[0] or 0
         max_amount = stats[1] or 0
 
-        # ===== TRANSACTIONS =====
-        cur.execute("""
-            SELECT COUNT(*) FROM history 
-            WHERE user_id=%s AND time >= NOW() - INTERVAL '1 hour'
-        """, (user_id,))
+        # TRANSACTIONS
+        cur.execute("SELECT COUNT(*) FROM history WHERE user_id=%s AND time >= NOW() - INTERVAL '1 hour'", (user_id,))
         txn_1hr = cur.fetchone()[0]
 
-        cur.execute("""
-            SELECT COUNT(*) FROM history 
-            WHERE user_id=%s AND time >= NOW() - INTERVAL '24 hours'
-        """, (user_id,))
+        cur.execute("SELECT COUNT(*) FROM history WHERE user_id=%s AND time >= NOW() - INTERVAL '24 hours'", (user_id,))
         txn_24hr = cur.fetchone()[0]
 
-        # ===== TIME GAP =====
-        cur.execute("""
-            SELECT EXTRACT(EPOCH FROM (NOW() - MAX(time)))
-            FROM history WHERE user_id=%s
-        """, (user_id,))
+        # TIME GAP
+        cur.execute("SELECT EXTRACT(EPOCH FROM (NOW() - MAX(time))) FROM history WHERE user_id=%s", (user_id,))
         gap = cur.fetchone()[0]
 
         time_gap = gap if gap else 0
 
-        # ===== INPUT =====
+        # INPUT
         input_df = pd.DataFrame([{
             "Amount": amount,
             "hour": hour,
@@ -165,19 +151,17 @@ def predict(data: dict, user=Depends(get_current_user)):
 
         input_df = input_df[features]
 
-        # ===== PREDICTIONS =====
+        # PREDICTIONS
         fraud_pred = int(fraud_model.predict(input_df)[0])
         prob = float(fraud_model.predict_proba(input_df)[0][1])
 
         anomaly_pred = anomaly_model.predict(input_df)[0]
         is_anomaly = 1 if anomaly_pred == -1 else 0
 
-        # ===== SHAP FIX =====
+        # SHAP
         scaled_input = fraud_model.named_steps["scaler"].transform(input_df)
-
         shap_values = explainer.shap_values(scaled_input)
-
-        values = shap_values[1][0]  # class 1
+        values = shap_values[1][0]
 
         shap_result = [
             {"feature": features[i], "impact": float(values[i])}
@@ -189,7 +173,7 @@ def predict(data: dict, user=Depends(get_current_user)):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-    # ===== RISK =====
+    # RISK
     if prob > 0.8:
         risk = "HIGH"
     elif prob > 0.5:
@@ -199,7 +183,7 @@ def predict(data: dict, user=Depends(get_current_user)):
     else:
         risk = "LOW"
 
-    # ===== SAVE =====
+    # SAVE
     cur.execute(
         "INSERT INTO history (user_id, amount, hour, fraud, risk) VALUES (%s,%s,%s,%s,%s)",
         (user_id, amount, hour, fraud_pred, risk)
@@ -222,6 +206,102 @@ def predict(data: dict, user=Depends(get_current_user)):
         "risk": risk,
         "explanation": shap_result[:5]
     }
+
+# ================= ALERTS ================= #
+@app.get("/alerts")
+def alerts(user=Depends(get_current_user)):
+
+    conn = get_connection()
+    cur = conn.cursor()
+
+    cur.execute("""
+        SELECT user_id, amount, risk, time
+        FROM history
+        WHERE risk IN ('HIGH','MEDIUM')
+        ORDER BY time DESC
+        LIMIT 10
+    """)
+
+    data = cur.fetchall()
+
+    cur.close()
+    conn.close()
+
+    return {"alerts": data}
+
+# ================= HISTORY ================= #
+@app.get("/history/{user_id}")
+def history(user_id: int, user=Depends(get_current_user)):
+
+    conn = get_connection()
+    cur = conn.cursor()
+
+    cur.execute("SELECT * FROM history WHERE user_id=%s ORDER BY id DESC", (user_id,))
+    data = cur.fetchall()
+
+    cur.close()
+    conn.close()
+
+    return {"history": data}
+
+# ================= BLACKLIST ================= #
+@app.post("/blacklist")
+def blacklist(user_id: int, reason: str, user=Depends(get_current_user)):
+
+    if user["role"] != "admin":
+        raise HTTPException(status_code=403, detail="Admin only")
+
+    conn = get_connection()
+    cur = conn.cursor()
+
+    cur.execute("INSERT INTO blacklist (user_id, reason) VALUES (%s,%s)", (user_id, reason))
+
+    conn.commit()
+    cur.close()
+    conn.close()
+
+    return {"message": "User blacklisted"}
+
+@app.delete("/blacklist/{user_id}")
+def remove(user_id: int, user=Depends(get_current_user)):
+
+    if user["role"] != "admin":
+        raise HTTPException(status_code=403, detail="Admin only")
+
+    conn = get_connection()
+    cur = conn.cursor()
+
+    cur.execute("DELETE FROM blacklist WHERE user_id=%s", (user_id,))
+    conn.commit()
+
+    cur.close()
+    conn.close()
+
+    return {"message": "Removed from blacklist"}
+
+# ================= AUDIT LOGS ================= #
+@app.get("/audit_logs")
+def audit_logs(user=Depends(get_current_user)):
+
+    if user["role"] != "admin":
+        raise HTTPException(status_code=403, detail="Admin only")
+
+    conn = get_connection()
+    cur = conn.cursor()
+
+    cur.execute("""
+        SELECT user_id, amount, risk, time
+        FROM history
+        ORDER BY time DESC
+        LIMIT 50
+    """)
+
+    logs = cur.fetchall()
+
+    cur.close()
+    conn.close()
+
+    return {"logs": logs}
 
 # ================= ROOT ================= #
 @app.get("/")
