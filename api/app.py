@@ -2,7 +2,7 @@
 from fastapi import FastAPI, HTTPException, Depends
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from database import get_connection
-from jose import jwt, JWTError
+from jose import jwt
 from pydantic import BaseModel
 import datetime
 import hashlib
@@ -47,7 +47,7 @@ class PredictRequest(BaseModel):
     hour: int
 
     class Config:
-        schema_extra = {
+        json_schema_extra = {
             "example": {
                 "user_id": 1,
                 "amount": 5000,
@@ -62,9 +62,17 @@ def hash_password(password: str):
 # ================= AUTH ================= #
 def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security)):
     try:
-        payload = jwt.decode(credentials.credentials, SECRET_KEY, algorithms=[ALGORITHM])
+        token = credentials.credentials
+
+        # 🔥 FIX TOKEN ISSUE
+        if token.startswith("Bearer "):
+            token = token.replace("Bearer ", "")
+
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
         return payload
-    except JWTError:
+
+    except Exception as e:
+        print("TOKEN ERROR:", e)
         raise HTTPException(status_code=401, detail="Invalid token")
 
 # ================= LOGIN ================= #
