@@ -111,7 +111,6 @@ def login(data: LoginRequest):
         "role": role
     }
 
-# ================= PREDICT ================= #
 @app.post("/predict")
 def predict(data: PredictRequest, user=Depends(get_current_user)):
 
@@ -121,37 +120,48 @@ def predict(data: PredictRequest, user=Depends(get_current_user)):
     conn = get_connection()
     cur = conn.cursor()
 
-    user_id = data.user_id if user["role"] == "admin" else int(user["sub"])
-    amount = data.amount
-    hour = data.hour
-
     try:
+        # ================= USER ================= #
+        user_id = data.user_id if user["role"] == "admin" else int(user["sub"])
+        amount = float(data.amount)
+        hour = int(data.hour)
+
         now = datetime.datetime.now()
 
+        # ================= FEATURES ================= #
         day_of_week = now.weekday()
         is_weekend = int(day_of_week >= 5)
         is_night = int(hour < 6)
 
-        # USER STATS
+        # ================= USER STATS ================= #
         cur.execute("SELECT AVG(amount), MAX(amount) FROM history WHERE user_id=%s", (user_id,))
-        stats = cur.fetchone()
+        stats = cur.fetchone() or (0, 0)
 
         avg_amount = stats[0] or 0
         max_amount = stats[1] or 0
 
-        # TRANSACTIONS
-        cur.execute("SELECT COUNT(*) FROM history WHERE user_id=%s AND time >= NOW() - INTERVAL '1 hour'", (user_id,))
-        txn_1hr = cur.fetchone()[0]
+        # ================= TRANSACTIONS ================= #
+        cur.execute(
+            "SELECT COUNT(*) FROM history WHERE user_id=%s AND time >= NOW() - INTERVAL '1 hour'",
+            (user_id,)
+        )
+        txn_1hr = cur.fetchone()[0] or 0
 
-        cur.execute("SELECT COUNT(*) FROM history WHERE user_id=%s AND time >= NOW() - INTERVAL '24 hours'", (user_id,))
-        txn_24hr = cur.fetchone()[0]
+        cur.execute(
+            "SELECT COUNT(*) FROM history WHERE user_id=%s AND time >= NOW() - INTERVAL '24 hours'",
+            (user_id,)
+        )
+        txn_24hr = cur.fetchone()[0] or 0
 
-        # TIME GAP
-        cur.execute("SELECT EXTRACT(EPOCH FROM (NOW() - MAX(time))) FROM history WHERE user_id=%s", (user_id,))
+        # ================= TIME GAP ================= #
+        cur.execute(
+            "SELECT EXTRACT(EPOCH FROM (NOW() - MAX(time))) FROM history WHERE user_id=%s",
+            (user_id,)
+        )
         gap = cur.fetchone()[0]
         time_gap = gap if gap else 0
 
-        # INPUT
+        # ================= INPUT DF ================= #
         input_df = pd.DataFrame([{
             "Amount": amount,
             "hour": hour,
@@ -167,30 +177,42 @@ def predict(data: PredictRequest, user=Depends(get_current_user)):
             "amount_deviation": amount - avg_amount
         }])
 
+        # ================= SAFE FEATURE ALIGN ================= #
+        for col in features:
+            if col not in input_df:
+                input_df[col] = 0
+
         input_df = input_df[features]
 
-        # PREDICTIONS
+        # ================= PREDICTION ================= #
         fraud_pred = int(fraud_model.predict(input_df)[0])
         prob = float(fraud_model.predict_proba(input_df)[0][1])
 
         anomaly_pred = anomaly_model.predict(input_df)[0]
         is_anomaly = int(anomaly_pred == -1)
 
-        # SHAP
-        scaled_input = fraud_model.named_steps["scaler"].transform(input_df)
-        shap_values = explainer.shap_values(scaled_input)
-        values = shap_values[1][0]
+        # ================= SHAP SAFE ================= #
+        try:
+            model_only = fraud_model.named_steps["model"]
 
-        shap_result = sorted(
-            [{"feature": features[i], "impact": float(values[i])} for i in range(len(features))],
-            key=lambda x: abs(x["impact"]),
-            reverse=True
-        )
+            shap_values = explainer.shap_values(input_df)
+            values = shap_values[1][0]
+
+            shap_result = sorted(
+                [{"feature": features[i], "impact": float(values[i])} for i in range(len(features))],
+                key=lambda x: abs(x["impact"]),
+                reverse=True
+            )
+
+        except Exception as e:
+            print("SHAP ERROR:", e)
+            shap_result = []
 
     except Exception as e:
+        print("PREDICT ERROR:", e)
         raise HTTPException(status_code=500, detail=str(e))
 
-    # RISK
+    # ================= RISK ================= #
     if prob > 0.8:
         risk = "HIGH"
     elif prob > 0.5:
@@ -200,21 +222,27 @@ def predict(data: PredictRequest, user=Depends(get_current_user)):
     else:
         risk = "LOW"
 
-    # SAVE
-    cur.execute(
-        "INSERT INTO history (user_id, amount, hour, fraud, risk) VALUES (%s,%s,%s,%s,%s)",
-        (user_id, amount, hour, fraud_pred, risk)
-    )
-
-    if risk == "HIGH":
+    # ================= SAVE ================= #
+    try:
         cur.execute(
-            "INSERT INTO blacklist (user_id, reason) VALUES (%s,%s)",
-            (user_id, "High risk fraud")
+            "INSERT INTO history (user_id, amount, hour, fraud, risk) VALUES (%s,%s,%s,%s,%s)",
+            (user_id, amount, hour, fraud_pred, risk)
         )
 
-    conn.commit()
-    cur.close()
-    conn.close()
+        if risk == "HIGH":
+            cur.execute(
+                "INSERT INTO blacklist (user_id, reason) VALUES (%s,%s)",
+                (user_id, "High risk fraud")
+            )
+
+        conn.commit()
+
+    except Exception as e:
+        print("DB ERROR:", e)
+
+    finally:
+        cur.close()
+        conn.close()
 
     return {
         "fraud": fraud_pred,
