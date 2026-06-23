@@ -67,8 +67,7 @@ def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(securit
         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
         return payload
 
-    except Exception as e:
-        print("TOKEN ERROR:", e)
+    except Exception:
         raise HTTPException(status_code=401, detail="Invalid token")
 
 # ================= LOGIN ================= #
@@ -167,14 +166,12 @@ def predict(data: PredictRequest, user=Depends(get_current_user)):
             "amount_deviation": amount - avg_amount
         }])
 
-        # Ensure feature match
         for col in features:
             if col not in input_df:
                 input_df[col] = 0
 
         input_df = input_df[features]
 
-        # ================= MODEL ================= #
         fraud_pred = int(fraud_model.predict(input_df)[0])
         prob = float(fraud_model.predict_proba(input_df)[0][1])
 
@@ -185,13 +182,11 @@ def predict(data: PredictRequest, user=Depends(get_current_user)):
         try:
             shap_values = explainer.shap_values(input_df)
 
-            # handle list or array
             if isinstance(shap_values, list):
                 values = shap_values[1] if len(shap_values) > 1 else shap_values[0]
             else:
                 values = shap_values
 
-            # convert safely
             values = pd.DataFrame(values).values
             values = values[0] if len(values.shape) > 1 else values
 
@@ -260,11 +255,23 @@ def predict(data: PredictRequest, user=Depends(get_current_user)):
         (user_id, amount, hour, fraud_pred, risk, device_id, location)
     )
 
+    # ================= SMART AUTO BLACKLIST ================= #
     if risk == "HIGH":
-        cur.execute(
-            "INSERT INTO blacklist (user_id, reason) VALUES (%s,%s)",
-            (user_id, "High risk fraud")
-        )
+        try:
+            cur.execute(
+                "SELECT COUNT(*) FROM history WHERE user_id=%s AND risk='HIGH'",
+                (user_id,)
+            )
+            count = cur.fetchone()[0] or 0
+
+            if count >= 2:
+                cur.execute(
+                    "INSERT INTO blacklist (user_id, reason) VALUES (%s,%s) ON CONFLICT DO NOTHING",
+                    (user_id, "multiple_high_risk")
+                )
+
+        except Exception as e:
+            print("AUTO BLACKLIST ERROR:", e)
 
     conn.commit()
     cur.close()
@@ -280,40 +287,15 @@ def predict(data: PredictRequest, user=Depends(get_current_user)):
         "explanation": shap_result[:5]
     }
 
-# ================= OTHER ROUTES (UNCHANGED) ================= #
-@app.get("/alerts")
-def alerts(user=Depends(get_current_user)):
+# ================= OTHER ROUTES ================= #
+@app.get("/blacklist")
+def get_blacklist(user=Depends(get_current_user)):
     conn = get_connection()
     cur = conn.cursor()
-    cur.execute("SELECT user_id, amount, risk, time FROM history ORDER BY time DESC LIMIT 20")
-    data = cur.fetchall()
+    cur.execute("SELECT user_id, reason FROM blacklist")
+    rows = cur.fetchall()
     cur.close(); conn.close()
-    return {"alerts": data}
-
-@app.get("/history/{user_id}")
-def history(user_id: int, user=Depends(get_current_user)):
-    conn = get_connection()
-    cur = conn.cursor()
-    cur.execute("SELECT * FROM history WHERE user_id=%s ORDER BY id DESC", (user_id,))
-    data = cur.fetchall()
-    cur.close(); conn.close()
-    return {"history": data}
-
-@app.post("/add_transaction")
-def add_transaction(data: TransactionRequest, user=Depends(get_current_user)):
-    conn = get_connection()
-    cur = conn.cursor()
-    uid = data.user_id if user["role"] == "admin" else int(user["sub"])
-
-    cur.execute(
-        "INSERT INTO history (user_id, amount, hour, fraud, risk) VALUES (%s,%s,%s,%s,%s)",
-        (uid, data.amount, data.hour, 0, "NORMAL")
-    )
-
-    conn.commit()
-    cur.close(); conn.close()
-
-    return {"message": "Transaction added"}
+    return {"blacklist": rows}
 
 @app.post("/blacklist")
 def blacklist(user_id: int, reason: str, user=Depends(get_current_user)):
@@ -338,30 +320,3 @@ def remove(user_id: int, user=Depends(get_current_user)):
     conn.commit()
     cur.close(); conn.close()
     return {"message": "Removed from blacklist"}
-
-@app.get("/blacklist")
-def get_blacklist(credentials: HTTPAuthorizationCredentials = Depends(security)):
-    conn = get_connection()
-    cur = conn.cursor()
-
-    cur.execute("SELECT user_id, reason FROM blacklist")
-    rows = cur.fetchall()
-
-    return {"blacklist": rows}
-
-
-@app.get("/audit_logs")
-def audit_logs(user=Depends(get_current_user)):
-    if user["role"] != "admin":
-        raise HTTPException(status_code=403, detail="Admin only")
-
-    conn = get_connection()
-    cur = conn.cursor()
-    cur.execute("SELECT user_id, amount, risk, time FROM history ORDER BY time DESC LIMIT 50")
-    logs = cur.fetchall()
-    cur.close(); conn.close()
-    return {"logs": logs}
-
-@app.get("/")
-def home():
-    return {"message": "Fraud Detection API running 🚀"}
