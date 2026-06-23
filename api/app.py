@@ -183,60 +183,50 @@ def predict(data: PredictRequest, user=Depends(get_current_user)):
             shap_values = explainer.shap_values(input_df)
 
             if isinstance(shap_values, list):
-                values = shap_values[1] if len(shap_values) > 1 else shap_values[0]
+                values = shap_values[1]
             else:
                 values = shap_values
 
-            values = pd.DataFrame(values).values
-            values = values[0] if len(values.shape) > 1 else values
+            values = values[0]
 
-            shap_result = sorted(
-                [
-                    {
-                        "feature": features[i],
-                        "impact": float(values[i]) if i < len(values) else 0.0
-                    }
-                    for i in range(len(features))
-                ],
-                key=lambda x: abs(x["impact"]),
-                reverse=True
-            )
+            shap_result = [
+                {"feature": features[i], "impact": float(values[i])}
+                for i in range(len(features))
+            ]
 
         except Exception as e:
-            print("SHAP ERROR FIXED:", e)
+            print("SHAP FIX:", e)
             shap_result = []
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-    # ================= BANKING RISK ================= #
+    # ================= RISK ================= #
     risk_score = 0
     reasons = []
 
     if prob > 0.8:
-        risk_score += 50; reasons.append("High ML fraud probability")
+        risk_score += 50
     elif prob > 0.5:
-        risk_score += 30; reasons.append("Moderate ML fraud probability")
+        risk_score += 30
 
-    if amount > avg_amount * 3:
-        risk_score += 30; reasons.append("Huge amount spike")
-    elif amount > avg_amount * 2:
-        risk_score += 20; reasons.append("High amount")
+    if amount > avg_amount * 2:
+        risk_score += 20
 
     if txn_1hr > 5:
-        risk_score += 25; reasons.append("High transaction velocity")
+        risk_score += 25
 
     if is_night:
-        risk_score += 10; reasons.append("Night transaction")
+        risk_score += 10
 
     if is_anomaly:
-        risk_score += 25; reasons.append("Anomaly detected")
+        risk_score += 25
 
     if geo_risk:
-        risk_score += 30; reasons.append("Unusual location")
+        risk_score += 30
 
     if new_device:
-        risk_score += 20; reasons.append("New device used")
+        risk_score += 20
 
     if risk_score >= 80:
         risk = "HIGH"
@@ -255,23 +245,19 @@ def predict(data: PredictRequest, user=Depends(get_current_user)):
         (user_id, amount, hour, fraud_pred, risk, device_id, location)
     )
 
-    # ================= SMART AUTO BLACKLIST ================= #
+    # ================= AUTO BLACKLIST ================= #
     if risk == "HIGH":
-        try:
+        cur.execute(
+            "SELECT COUNT(*) FROM history WHERE user_id=%s AND risk='HIGH'",
+            (user_id,)
+        )
+        count = cur.fetchone()[0] or 0
+
+        if count >= 2:
             cur.execute(
-                "SELECT COUNT(*) FROM history WHERE user_id=%s AND risk='HIGH'",
-                (user_id,)
+                "INSERT INTO blacklist (user_id, reason) VALUES (%s,%s) ON CONFLICT DO NOTHING",
+                (user_id, "multiple_high_risk")
             )
-            count = cur.fetchone()[0] or 0
-
-            if count >= 2:
-                cur.execute(
-                    "INSERT INTO blacklist (user_id, reason) VALUES (%s,%s) ON CONFLICT DO NOTHING",
-                    (user_id, "multiple_high_risk")
-                )
-
-        except Exception as e:
-            print("AUTO BLACKLIST ERROR:", e)
 
     conn.commit()
     cur.close()
@@ -282,12 +268,31 @@ def predict(data: PredictRequest, user=Depends(get_current_user)):
         "probability": prob,
         "risk": risk,
         "risk_score": risk_score,
-        "reasons": reasons,
         "anomaly": is_anomaly,
         "explanation": shap_result[:5]
     }
 
-# ================= OTHER ROUTES ================= #
+# ================= ALERTS ================= #
+@app.get("/alerts")
+def alerts(user=Depends(get_current_user)):
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute("SELECT user_id, amount, risk, time FROM history ORDER BY time DESC LIMIT 20")
+    data = cur.fetchall()
+    cur.close(); conn.close()
+    return {"alerts": data}
+
+# ================= HISTORY ================= #
+@app.get("/history/{user_id}")
+def history(user_id: int, user=Depends(get_current_user)):
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute("SELECT user_id, amount, risk, time FROM history WHERE user_id=%s ORDER BY time DESC", (user_id,))
+    data = cur.fetchall()
+    cur.close(); conn.close()
+    return {"history": data}
+
+# ================= BLACKLIST ================= #
 @app.get("/blacklist")
 def get_blacklist(user=Depends(get_current_user)):
     conn = get_connection()
@@ -301,7 +306,6 @@ def get_blacklist(user=Depends(get_current_user)):
 def blacklist(user_id: int, reason: str, user=Depends(get_current_user)):
     if user["role"] != "admin":
         raise HTTPException(status_code=403, detail="Admin only")
-
     conn = get_connection()
     cur = conn.cursor()
     cur.execute("INSERT INTO blacklist (user_id, reason) VALUES (%s,%s)", (user_id, reason))
@@ -313,10 +317,14 @@ def blacklist(user_id: int, reason: str, user=Depends(get_current_user)):
 def remove(user_id: int, user=Depends(get_current_user)):
     if user["role"] != "admin":
         raise HTTPException(status_code=403, detail="Admin only")
-
     conn = get_connection()
     cur = conn.cursor()
     cur.execute("DELETE FROM blacklist WHERE user_id=%s", (user_id,))
     conn.commit()
     cur.close(); conn.close()
     return {"message": "Removed from blacklist"}
+
+# ================= ROOT ================= #
+@app.get("/")
+def home():
+    return {"message": "Fraud Detection API running 🚀"}
