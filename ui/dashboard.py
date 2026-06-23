@@ -83,15 +83,13 @@ def risk_color(r):
         "LOW": "🟢 LOW"
     }.get(r, r)
 
-# ================= SAFE DF FUNCTION ================= #
+# ================= SAFE DF ================= #
 def safe_df(data):
     df = pd.DataFrame(data)
 
-    # tuple case
     if list(df.columns) == list(range(len(df.columns))):
         df.columns = ["user_id","amount","risk","time"]
 
-    # dict but wrong keys
     if "risk" not in df.columns and len(df.columns) >= 4:
         df.columns = ["user_id","amount","risk","time"]
 
@@ -119,10 +117,8 @@ if menu == "Dashboard":
         st.stop()
 
     df = safe_df(data)
-
     df["time"] = pd.to_datetime(df["time"], errors="coerce")
 
-    # KPIs
     c1,c2,c3,c4 = st.columns(4)
     c1.metric("Transactions", len(df))
     c2.metric("High Risk", (df["risk"]=="HIGH").sum())
@@ -208,10 +204,7 @@ elif menu == "Add Transaction":
             headers=headers
         )
 
-        if r.status_code == 200:
-            st.success("Transaction Added")
-        else:
-            st.error("Failed")
+        st.success("Transaction Added" if r.status_code==200 else "Failed")
 
 # ================= ALERTS ================= #
 elif menu == "Alerts":
@@ -219,8 +212,12 @@ elif menu == "Alerts":
     st.title("🚨 Alerts")
 
     r = requests.get(f"{API_URL}/alerts", headers=headers)
-    if r.status_code == 200:
-        df = safe_df(r.json()["alerts"])
+    data = r.json().get("alerts", []) if r.status_code == 200 else []
+
+    if not data:
+        st.warning("No alerts")
+    else:
+        df = safe_df(data)
         df["risk"] = df["risk"].apply(risk_color)
         st.dataframe(df)
 
@@ -230,8 +227,12 @@ elif menu == "History":
     st.title("📜 History")
 
     r = requests.get(f"{API_URL}/history/{user_id}", headers=headers)
-    if r.status_code == 200:
-        df = safe_df(r.json()["history"])
+    data = r.json().get("history", []) if r.status_code == 200 else []
+
+    if not data:
+        st.warning("No history")
+    else:
+        df = safe_df(data)
         st.dataframe(df)
 
 # ================= BLACKLIST ================= #
@@ -260,24 +261,24 @@ elif menu == "Blacklist":
         )
         st.success("Removed" if r.status_code==200 else "Failed")
 
-    # SHOW BLACKLIST TABLE
+  # ================= REAL BLACKLIST ================= #
     st.subheader("⚠️ Blacklisted Users")
 
-    r = requests.get(f"{API_URL}/audit_logs", headers=headers)
+    r = requests.get(f"{API_URL}/blacklist", headers=headers)
 
-    if r.status_code == 200:
-        data = r.json()["logs"]
+    data = r.json().get("blacklist", []) if r.status_code == 200 else []
 
-    df = pd.DataFrame(data, columns=["user_id","amount","risk","time"])
-
-    # 🔥 Get unique HIGH risk users (simulate blacklist view)
-    blacklisted = df[df["risk"] == "HIGH"]["user_id"].unique()
-
-    if len(blacklisted) == 0:
+# ✅ SAFE CHECK
+    if not data or len(data) == 0:
         st.info("No blacklisted users")
     else:
-        st.dataframe(pd.DataFrame({"blacklisted_user_id": blacklisted}))
+    # ✅ HANDLE BOTH tuple + dict formats
+        if isinstance(data[0], (list, tuple)):
+            df = pd.DataFrame(data, columns=["user_id", "reason"])
+        else:
+         df = pd.DataFrame(data)
 
+        st.dataframe(df)
 # ================= AUDIT ================= #
 elif menu == "Audit Logs":
 
@@ -288,9 +289,12 @@ elif menu == "Audit Logs":
     st.title("📜 Audit Logs")
 
     r = requests.get(f"{API_URL}/audit_logs", headers=headers)
+    data = r.json().get("logs", []) if r.status_code == 200 else []
 
-    if r.status_code == 200:
-        df = safe_df(r.json()["logs"])
+    if not data:
+        st.warning("No logs")
+    else:
+        df = safe_df(data)
         st.dataframe(df)
 
 # ================= LOGOUT ================= #

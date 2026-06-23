@@ -317,6 +317,25 @@ def remove_blacklist(user_id: int, user=Depends(get_current_user)):
     conn.commit()
     cur.close(); conn.close()
     return {"message": "Removed"}
+# ================= AUDIT LOGS ================= #
+@app.get("/audit_logs")
+def audit_logs(user=Depends(get_current_user)):
+    conn = get_connection()
+    cur = conn.cursor()
+
+    cur.execute("""
+        SELECT user_id, amount, risk, time 
+        FROM history 
+        ORDER BY time DESC 
+        LIMIT 50
+    """)
+
+    data = cur.fetchall()
+
+    cur.close()
+    conn.close()
+
+    return {"logs": data}
 
 # ================= ROOT ================= #
 @app.get("/")
