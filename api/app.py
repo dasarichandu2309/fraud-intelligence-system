@@ -337,6 +337,62 @@ def audit_logs(user=Depends(get_current_user)):
 
     return {"logs": data}
 
+# ================= ADD TRANSACTION ================= #
+@app.post("/add_transaction")
+def add_transaction(data: TransactionRequest, user=Depends(get_current_user)):
+
+    conn = get_connection()
+    cur = conn.cursor()
+
+    # 🔐 Role handling
+    user_id = data.user_id if user["role"] == "admin" else int(user["sub"])
+
+    amount = data.amount
+    hour = data.hour
+
+    # ================= BASIC RISK LOGIC ================= #
+    risk = "LOW"
+
+    if amount > 100000:
+        risk = "MEDIUM"
+    if amount > 500000:
+        risk = "HIGH"
+
+    fraud_pred = 1 if risk == "HIGH" else 0
+
+    # ================= SAVE ================= #
+    cur.execute(
+        """
+        INSERT INTO history 
+        (user_id, amount, hour, fraud, risk)
+        VALUES (%s,%s,%s,%s,%s)
+        """,
+        (user_id, amount, hour, fraud_pred, risk)
+    )
+
+    # ================= AUTO BLACKLIST ================= #
+    if risk == "HIGH":
+        cur.execute(
+            "SELECT COUNT(*) FROM history WHERE user_id=%s AND risk='HIGH'",
+            (user_id,)
+        )
+        count = cur.fetchone()[0] or 0
+
+        if count >= 2:
+            cur.execute(
+                "INSERT INTO blacklist (user_id, reason) VALUES (%s,%s) ON CONFLICT DO NOTHING",
+                (user_id, "multiple_high_risk")
+            )
+
+    conn.commit()
+    cur.close()
+    conn.close()
+
+    return {
+        "message": "Transaction added",
+        "risk": risk
+    }
+
 # ================= ROOT ================= #
 @app.get("/")
 def home():

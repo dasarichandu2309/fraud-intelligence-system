@@ -5,7 +5,6 @@ from jose import jwt
 import time
 
 API_URL = "https://fraud-api-mcgb.onrender.com"
-
 st.set_page_config(page_title="Fraud Intelligence System", layout="wide")
 
 # ================= UI STYLE ================= #
