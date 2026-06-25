@@ -1,0 +1,39 @@
+services:
+
+  backend:
+    build: ./api
+    container_name: fraud_api
+    ports:
+      - "8000:8000"
+    depends_on:
+      - db
+    environment:
+      DATABASE_URL: postgresql://admin:admin@db:5432/fraud_db
+
+  frontend:
+    build: ./ui
+    container_name: fraud_ui
+    ports:
+      - "8501:8501"
+    depends_on:
+      - backend
+
+  db:
+    image: postgres:15
+    container_name: fraud_db
+    restart: always
+
+    environment:
+      POSTGRES_USER: admin
+      POSTGRES_PASSWORD: admin
+      POSTGRES_DB: fraud_db
+
+    ports:
+      - "5432:5432"
+
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./init.sql:/docker-entrypoint-initdb.d/init.sql
+
+volumes:
+  pgdata:
